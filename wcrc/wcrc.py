@@ -7,7 +7,7 @@ import logging
 import math
 import uuid
 
-import websockets
+import aiohttp
 
 import weechat
 
@@ -106,19 +106,31 @@ class ServerState(enum.Enum):
 
 
 class Server:
-    def __init__(self, name, loop, plugin):
+    _nick_groups = {
+        "0|online": weechat.color("nicklist_group"),
+        "1|busy": weechat.color("nicklist_away"),
+        "2|away": weechat.color("nicklist_away"),
+        "3|offline": weechat.color("chat_nick_offline"),
+    }
+
+    def __init__(self, name, uri, ssl, loop, plugin):
         self._name = name
         self._loop = loop
         self._plugin = plugin
+        self._ws_uri = "ws%s://%s/websocket" % ("s" if ssl else "", uri)
+        self._rest_uri = "http%s://%s/api/v1" % ("s" if ssl else "", uri)
 
         self._state = ServerState.DISCONNECTED
-        self._username = "weechat"
-        self._uid = None
-        self._ws = None
-        self._main_loop = None
-        self._rooms = {}
-
+        self._buffers = {}
         self._method_ids = set()
+
+        # All set during connect()
+        self._username = None
+        self._uid = None
+        self._main_loop = None
+        self._session = None
+        self._ws = None
+        self._users = {}
 
     @property
     def name(self):
@@ -132,29 +144,22 @@ class Server:
             self._main_loop = None
 
         await self._ws.close()
+        await self._session.close()
 
-        rids = list(self._rooms.keys())
+        rids = list(self._buffers.keys())
         for rid in rids:
-            room = self._rooms.pop(rid)
-            room.disconnect()
+            buf = self._buffers.pop(rid)
+            weechat.buffer_close(buf)
 
         self._ws = None
         self._state = ServerState.DISCONNECTED
 
-    def close_room(self, rid):
-        if rid not in self._rooms:
-            return
-
-        if rid in self._rooms:
-            self._rooms.pop(rid)
-
     async def recv(self):
         while True:
-            data = await self._ws.recv()
-            jd = json.loads(data)
+            jd = await self._ws.receive_json()
 
             if jd.get("msg") == "ping":
-                await self._ws.send(json.dumps({"msg": "pong"}))
+                await self._ws.send_json({"msg": "pong"})
                 continue
 
             if jd.get("msg") == "added" and (
@@ -169,7 +174,17 @@ class Server:
             return jd
 
     async def send(self, msg):
-        return await self._ws.send(json.dumps(msg))
+        return await self._ws.send_json(msg)
+
+    @contextlib.asynccontextmanager
+    async def rest_get(self, page, **kwds):
+        async with self._session.get(f"{self._rest_uri}/{page}", **kwds) as resp:
+            yield resp
+
+    @contextlib.asynccontextmanager
+    async def rest_post(self, page, **kwds):
+        async with self._session.post(f"{self._rest_uri}/{page}", **kwds) as resp:
+            yield resp
 
     def send_message(self, rid, msg):
         msg_id = f"{hash(msg)}"
@@ -193,8 +208,108 @@ class Server:
             )
         )
 
-    async def connect(self, uri, token):
-        self._ws = await websockets.connect(uri, loop=loop)
+    async def _update_buffer_from_sub(self, sub):
+        rid = sub["rid"]
+        buf = self._buffers.get(rid)
+        if buf is None:
+            if sub["t"] in ("c", "p"):
+                name = f"#{sub['name']}"
+            elif sub["t"] == "d":
+                name = sub["name"]
+
+            buf = weechat.buffer_new(name, "on_buf_input", "", "on_buf_closed", "")
+
+            weechat.buffer_set(buf, "notify", "2")
+            weechat.buffer_set(buf, "short_name", name)
+            weechat.buffer_set(buf, "nicklist", "1")
+            weechat.buffer_set(buf, "localvar_set_server", self._name)
+            weechat.buffer_set(buf, "localvar_set_rid", rid)
+            weechat.buffer_set(buf, "localvar_set_type", sub["t"])
+
+            for ng, color in self._nick_groups.items():
+                weechat.nicklist_add_group(buf, "", ng, color, 1)
+
+        weechat.buffer_set(buf, "hidden", "0" if sub["open"] else "1")
+        return buf
+
+    async def _set_room_members(self, buf, rid):
+        rtype = weechat.buffer_get_string(buf, "localvar_type")
+        groups = {
+            n.split("|")[1]: weechat.nicklist_search_group(buf, "", n)
+            for n in self._nick_groups
+        }
+
+        if rtype == "c":
+            async with self.rest_get(
+                "channels.members", params={"roomId": rid}
+            ) as resp:
+                jd = await resp.json()
+                assert jd["success"]
+                for member in jd["members"]:
+                    nicklist = groups[member["status"]]
+                    weechat.nicklist_add_nick(
+                        buf, nicklist, member["username"], "", "", "", 1
+                    )
+
+        elif rtype == "d":
+            async with self.rest_get("rooms.info", params={"roomId": rid}) as resp:
+                jd = await resp.json()
+                assert jd["success"]
+                for uid in jd["room"]["uids"]:
+                    user = self._users[uid]
+                    nicklist = groups[user._status]
+                    weechat.nicklist_add_nick(
+                        buf, nicklist, user._username, "", "", "", 1
+                    )
+
+        elif rtype == "p":
+            async with self.rest_get("groups.members", params={"roomId": rid}) as resp:
+                jd = await resp.json()
+                assert jd["success"]
+                for name, status in (
+                    (m["username"], m["status"]) for m in jd["members"]
+                ):
+                    nicklist = groups[status]
+                    weechat.nicklist_add_nick(buf, nicklist, name, "", "", "", 1)
+
+    async def connect(self, token):
+        async with aiohttp.request(
+            "post", f"{self._rest_uri}/login", json={"resume": token}
+        ) as resp:
+            jd = await resp.json()
+            assert jd["status"] == "success"
+            self._username = jd["data"]["me"]["username"]
+            self._uid = jd["data"]["me"]["_id"]
+            self._http_token = jd["data"]["authToken"]
+            self._session = aiohttp.ClientSession(
+                headers={
+                    "X-User-Id": self._uid,
+                    "X-Auth-Token": jd["data"]["authToken"],
+                }
+            )
+            logging.info("REST login to %s as %s", self._name, self._username)
+
+        async with self.rest_get("users.list") as resp:
+            jd = await resp.json()
+            assert jd["success"]
+            self._users = {
+                u["_id"]: User(u["username"], u["_id"], u["status"])
+                for u in jd["users"]
+            }
+
+        async with self.rest_get("subscriptions.get") as resp:
+            jd = await resp.json()
+            assert jd["success"]
+            for sub in jd["update"]:
+                buf = await self._update_buffer_from_sub(sub)
+                self._buffers[sub["rid"]] = buf
+
+        for rid, buf in self._buffers.items():
+            await self._set_room_members(buf, rid)
+            # get_history()
+            # await room.connect()
+
+        self._ws = await self._session.ws_connect(f"{self._ws_uri}")
 
         jd = await self.recv()
         assert jd == {"server_id": "0"}
@@ -221,34 +336,6 @@ class Server:
 
         await self.send(
             {
-                "msg": "method",
-                "method": "rooms/get",
-                "id": f"{self._name}.rooms/get",
-                "params": [],
-            }
-        )
-        while True:
-            jd = await self.recv()
-            if jd.get("id") == f"{self._name}.rooms/get":
-                break
-
-            assert jd.get("msg") == "updated"
-
-        for room in jd.get("result", []):
-            if room["t"] in ("c", "p"):
-                r = Room(self, room["_id"], f"#{room['name']}")
-            elif room["t"] == "d":
-                r = Room(
-                    self,
-                    room["_id"],
-                    " ".join(n for n in room["usernames"] if n != self._username),
-                )
-
-            self._rooms[room["_id"]] = r
-            # r.get_history()
-
-        await self.send(
-            {
                 "msg": "sub",
                 "id": f"{self._name}.stream-room-messages",
                 "name": "stream-room-messages",
@@ -269,6 +356,16 @@ class Server:
 
     async def _main(self):
         self._state = ServerState.CONNECTED
+        logging.info("Connected to %s as %s", self._name, self._username)
+
+        await self.send(
+            {
+                "msg": "sub",
+                "id": "stream-notify-logged",
+                "name": "stream-notify-logged",
+                "params": ["user-status", True],
+            }
+        )
 
         while True:
             try:
@@ -286,25 +383,60 @@ class Server:
         ):
             msg, room_meta = jd["fields"]["args"]
 
-            room = self._rooms.get(msg["rid"])
-            if room is None:
-                if room_meta["roomType"] in ("c", "p"):
-                    name = f"#{room_meta['roomName']}"
-                    room = Room(self, msg["rid"], name)
-                    self._rooms[msg["rid"]] = room
-                    logging.debug("New room %s %s", msg["rid"], name)
-                else:
-                    method_id = f"new-room.{msg['rid']}"
-                    await self.send(
-                        {
-                            "msg": "method",
-                            "method": "rooms/get",
-                            "id": method_id,
-                            "params": [msg["ts"]],
-                        }
+            buf = self._buffers.get(msg["rid"])
+            if buf is None:
+                async with self.rest_get(
+                    "subscriptions.getOne",
+                    params={"roomId": msg["rid"]},
+                ) as resp:
+                    jd = await resp.json()
+                    assert jd["success"]
+
+                    if jd == {"success": True}:
+                        # Not actually subscribed to this channel.  Which begs
+                        # the question why the message was sent in the first
+                        # place...
+                        return
+
+                    sub = jd["subscription"]
+                    rid = sub["rid"]
+                    buf = await self._update_buffer_from_sub(sub)
+                    self._buffers[rid] = buf
+                    await self._set_room_members(buf, rid)
+                    logging.debug(
+                        "New room %s %s",
+                        rid,
+                        weechat.buffer_get_string(buf, "name"),
                     )
-                    return
-            weechat.prnt(room._buffer, f"{msg['u']['username']}\t{msg['msg']}")
+
+            weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
+
+        elif (
+            jd.get("msg") == "changed"
+            and jd.get("collection") == "stream-notify-logged"
+            and jd["fields"]["eventName"] == "user-status"
+        ):
+            int_to_status = ["offline", "online", "away", "busy"]
+            uid, username, int_status, _ = jd["fields"]["args"][0]
+            status = int_to_status[int_status]
+
+            user = self._users.get(uid)
+            if user is not None:
+                user._status = status
+            else:
+                self._users[uid] = User(username, uid, status)
+
+            for buf in self._buffers.values():
+                nick = weechat.nicklist_search_nick(buf, "", username)
+                if not nick:
+                    continue
+
+                weechat.nicklist_remove_nick(buf, nick)
+                group_name = next(
+                    n for n in self._nick_groups if n.split("|")[1] == status
+                )
+                group = weechat.nicklist_search_group(buf, "", group_name)
+                weechat.nicklist_add_nick(buf, group, username, "", "", "", 1)
 
         elif jd.get("msg") == "updated" and jd.get("methods", []):
             # Nothing to do with this right now
@@ -314,63 +446,30 @@ class Server:
                 # We called a method and it worked
                 self._method_ids.remove(jd["id"])
 
-            elif jd.get("id").startswith("new-room."):
-                # New private chat
-                _, rid = jd["id"].split(".", 1)
-                room_data = next(r for r in jd["result"]["update"] if r["_id"] == rid)
-                name = ", ".join(
-                    n for n in room_data["usernames"] if n != self._username
-                )
-                room = Room(self, rid, name)
-                self._rooms[rid] = room
-                logging.debug("New room %s %s", rid, name)
-
-                msg = room_data["lastMessage"]
-                weechat.prnt(room._buffer, f"{msg['u']['username']}\t{msg['msg']}")
+        elif jd.get("msg") == "ready" and jd.get("subs", []):
+            # Successful subscription
+            pass
         else:
             logging.warning(
                 "Unhandled message:\n%s", json.dumps(jd, sort_keys=True, indent=2)
             )
 
 
-class Room:
-    def __init__(self, server, id_, name):
-        self._server = server
-        self._id = id_
-        self._name = name
-        self._got_history = False
-
-        self._buffer = weechat.buffer_new(
-            name,
-            "on_buf_input",
-            f"{server.name}.{id_}",
-            "on_buf_closed",
-            f"{server.name}.{id_}",
-        )
-
-        weechat.buffer_set(self._buffer, "short_name", name)
-        weechat.buffer_set(self._buffer, "notify", "3")
-
-    def disconnect(self):
-        weechat.buffer_close(self._buffer)
-
-    def get_history(self):
-        self._got_history = False
-        self._server.ws.send(
-            json.dumps(
-                {
-                    "msg": "method",
-                    "method": "loadHistory",
-                    "id": f"{self._server.name}.{self._name}.loadHistory",
-                    "params": [self._id, None, 200, None],
-                }
-            )
-        )
+class User:
+    def __init__(self, username, uid, status):
+        self._username = username
+        self._uid = uid
+        self._status = status
 
 
 def on_buf_input(data, buf, c):
-    server_name, rid = data.split(".")
+    if data == "debug-buffer":
+        return weechat.WEECHAT_RC_ERROR
+
+    server_name = weechat.buffer_get_string(buf, "localvar_server")
     server = plugin.server(server_name)
+
+    rid = weechat.buffer_get_string(buf, "localvar_rid")
     server.send_message(rid, c)
     return weechat.WEECHAT_RC_OK
 
@@ -379,9 +478,8 @@ def on_buf_closed(data, buf):
     if data == "debug-buffer":
         return weechat.WEECHAT_RC_OK
 
-    server_name, rid = data.split(".")
-    server = plugin.server(server_name)
-    server.close_room(rid)
+    # TODO part from the channel
+
     return weechat.WEECHAT_RC_OK
 
 
@@ -507,10 +605,10 @@ class Plugin:
         token = weechat.config_get_plugin(f"servers.{server}.token")
         logging.debug("Connecting to %s", server)
 
-        self._servers[server] = Server(name=server, loop=self._loop, plugin=self)
-        self.create_task(
-            self._servers[server].connect(f"ws://{host}:{port}/websocket", token)
+        self._servers[server] = Server(
+            name=server, uri=f"{host}:{port}", ssl=False, loop=self._loop, plugin=self
         )
+        self.create_task(self._servers[server].connect(token))
         return weechat.WEECHAT_RC_OK
 
 
