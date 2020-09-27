@@ -244,7 +244,7 @@ class Server:
                 "channels.members", params={"roomId": rid}
             ) as resp:
                 jd = await resp.json()
-                assert jd["success"]
+                assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
                 for member in jd["members"]:
                     nicklist = groups[member["status"]]
                     weechat.nicklist_add_nick(
@@ -254,7 +254,7 @@ class Server:
         elif rtype == "d":
             async with self.rest_get("rooms.info", params={"roomId": rid}) as resp:
                 jd = await resp.json()
-                assert jd["success"]
+                assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
                 for uid in jd["room"]["uids"]:
                     user = self._users[uid]
                     nicklist = groups[user._status]
@@ -265,7 +265,7 @@ class Server:
         elif rtype == "p":
             async with self.rest_get("groups.members", params={"roomId": rid}) as resp:
                 jd = await resp.json()
-                assert jd["success"]
+                assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
                 for name, status in (
                     (m["username"], m["status"]) for m in jd["members"]
                 ):
@@ -277,7 +277,7 @@ class Server:
             "post", f"{self._rest_uri}/login", json={"resume": token}
         ) as resp:
             jd = await resp.json()
-            assert jd["status"] == "success"
+            assert jd["status"] == "success", json.dumps(jd, sort_keys=True, indent=2)
             self._username = jd["data"]["me"]["username"]
             self._uid = jd["data"]["me"]["_id"]
             self._http_token = jd["data"]["authToken"]
@@ -291,7 +291,7 @@ class Server:
 
         async with self.rest_get("users.list") as resp:
             jd = await resp.json()
-            assert jd["success"]
+            assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
             self._users = {
                 u["_id"]: User(u["username"], u["_id"], u["status"])
                 for u in jd["users"]
@@ -299,7 +299,7 @@ class Server:
 
         async with self.rest_get("subscriptions.get") as resp:
             jd = await resp.json()
-            assert jd["success"]
+            assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
             for sub in jd["update"]:
                 buf = await self._update_buffer_from_sub(sub)
                 self._buffers[sub["rid"]] = buf
@@ -312,11 +312,11 @@ class Server:
         self._ws = await self._session.ws_connect(f"{self._ws_uri}")
 
         jd = await self.recv()
-        assert jd == {"server_id": "0"}
+        assert jd == {"server_id": "0"}, json.dumps(jd, sort_keys=True, indent=2)
 
         await self.send({"msg": "connect", "version": "1", "support": ["1"]})
         jd = await self.recv()
-        assert jd.get("msg") == "connected"
+        assert jd.get("msg") == "connected", json.dumps(jd, sort_keys=True, indent=2)
 
         await self.send(
             {
@@ -332,7 +332,9 @@ class Server:
                 self._uid = jd["result"]["id"]
                 break
 
-            assert jd.get("msg") == "added" and jd.get("collection") == "users"
+            assert (
+                jd.get("msg") == "added" and jd.get("collection") == "users"
+            ), json.dumps(jd, sort_keys=True, indent=2)
 
         await self.send(
             {
@@ -350,7 +352,7 @@ class Server:
                 break
 
             logging.debug(jd)
-            assert jd.get("msg") == "updated"
+            assert jd.get("msg") == "updated", json.dumps(jd, sort_keys=True, indent=2)
 
         self._main_loop = asyncio.create_task(self._main())
 
@@ -390,7 +392,7 @@ class Server:
                     params={"roomId": msg["rid"]},
                 ) as resp:
                     jd = await resp.json()
-                    assert jd["success"]
+                    assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
 
                     if jd == {"success": True}:
                         # Not actually subscribed to this channel.  Which begs
