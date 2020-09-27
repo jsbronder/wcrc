@@ -137,6 +137,10 @@ class Server:
     def name(self):
         return self._name
 
+    @property
+    def users(self):
+        return self._users
+
     async def disconnect(self):
         if self._main_loop is not None:
             with contextlib.suppress(asyncio.CancelledError):
@@ -544,6 +548,7 @@ class Plugin:
             logging.debug("Loaded config for %s", server)
 
         weechat.hook_command_run("/connect", "rc_command_run_cb", "connect")
+        weechat.hook_command_run("/users", "rc_server_run_cb", "users")
 
     def server(self, name):
         return self._servers[name]
@@ -664,6 +669,33 @@ def rc_command_run_cb(cmd, buf, args):
         return weechat.WEECHAT_RC_OK
 
     return f(buf, *args.split()[1:])
+
+
+def rc_server_run_cb(cmd, buf, args):
+    logging.debug("rc_server_run_cb: cmd: %s, buf: %s, args: %s", cmd, buf, args)
+    server_name = weechat.buffer_get_string(buf, "localvar_server")
+    if not server_name:
+        return weechat.WEECHAT_RC_ERROR
+
+    server = plugin.server(server_name)
+
+    if cmd == "users":
+        colors = {
+            "online": weechat.color("nicklist_group"),
+            "busy": weechat.color("nicklist_away"),
+            "away": weechat.color("nicklist_away"),
+            "offline": weechat.color("chat_nick_offline"),
+        }
+        prefix = weechat.prefix("network")
+
+        weechat.prnt(buf, f"{prefix}Users on {server.name}:")
+        for uid, user in server.users.items():
+            weechat.prnt(
+                buf,
+                f"{prefix}  {user._username:<30}{colors[user._status]}{user._status}",
+            )
+
+        return weechat.WEECHAT_RC_OK_EAT
 
 
 def rc_command_cb(_, buf, args):
