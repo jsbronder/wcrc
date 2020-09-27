@@ -1,6 +1,7 @@
 import asyncio
 import concurrent
 import contextlib
+import datetime
 import enum
 import json
 import logging
@@ -272,6 +273,50 @@ class Server:
                     nicklist = groups[status]
                     weechat.nicklist_add_nick(buf, nicklist, name, "", "", "", 1)
 
+    async def _set_room_history(self, buf, rid, oldest_ts):
+        rtype = weechat.buffer_get_string(buf, "localvar_type")
+
+        url = {
+            "c": "channels.history",
+            "d": "im.history",
+            "p": "groups.history",
+        }[rtype]
+
+        tags = ",".join(("notify_none", "no_highlight", "logger_backlog"))
+        stack = []
+        params = {"roomId": rid, "unreads": "true", "count": 50}
+        if oldest_ts is not None:
+            params["oldest"] = oldest_ts
+
+        while True:
+            async with self.rest_get(url, params=params) as resp:
+                jd = await resp.json()
+
+                assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
+                msgs = jd.get("messages", [])
+                stack.extend(msgs)
+
+                if jd.get("unreadNotLoaded", 0) == 0:
+                    break
+
+                params["offset"] = len(stack)
+
+        stack.reverse()
+        for msg in stack:
+            msg_ts = msg.get("editedAt", msg["ts"]).rstrip("Z")
+            ts = datetime.datetime.fromisoformat(msg_ts)
+            ts += ts.astimezone().utcoffset()
+
+            weechat.prnt_date_tags(
+                buf, int(ts.timestamp()), tags, f"{msg['u']['username']}\t{msg['msg']}"
+            )
+
+        logging.debug(
+            "Loaded %s messages to '%s' backlog",
+            len(stack),
+            weechat.buffer_get_string(buf, "short_name"),
+        )
+
     async def connect(self, token):
         async with aiohttp.request(
             "post", f"{self._rest_uri}/login", json={"resume": token}
@@ -301,13 +346,12 @@ class Server:
             jd = await resp.json()
             assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
             for sub in jd["update"]:
+                rid = sub["rid"]
                 buf = await self._update_buffer_from_sub(sub)
-                self._buffers[sub["rid"]] = buf
+                self._buffers[rid] = buf
 
-        for rid, buf in self._buffers.items():
-            await self._set_room_members(buf, rid)
-            # get_history()
-            # await room.connect()
+                await self._set_room_members(buf, rid)
+                await self._set_room_history(buf, rid, sub.get("ts"))
 
         self._ws = await self._session.ws_connect(f"{self._ws_uri}")
 
