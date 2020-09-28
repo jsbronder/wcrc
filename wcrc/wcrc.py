@@ -134,12 +134,41 @@ class Server:
         self._users = {}
 
     @property
+    def buffers(self):
+        return self._buffers
+
+    @property
     def name(self):
         return self._name
 
     @property
     def users(self):
         return self._users
+
+    @property
+    def username(self):
+        return self._username
+
+    async def create_im(self, nick):
+        async with self.rest_post("im.create", json={"username": nick}) as resp:
+            jd = await resp.json()
+            assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
+            rid = jd["room"]["rid"]
+
+            async with self.rest_get(
+                "subscriptions.getOne", params={"roomId": rid}
+            ) as resp:
+                jd = await resp.json()
+                assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
+                sub = jd["subscription"]
+                buf = await self._update_buffer_from_sub(sub)
+                self._buffers[rid] = buf
+                await self._set_room_members(buf, rid)
+                logging.debug(
+                    "New room %s %s",
+                    rid,
+                    weechat.buffer_get_string(buf, "name"),
+                )
 
     async def disconnect(self):
         if self._main_loop is not None:
@@ -549,6 +578,7 @@ class Plugin:
 
         weechat.hook_command_run("/connect", "rc_command_run_cb", "connect")
         weechat.hook_command_run("/users", "rc_server_run_cb", "users")
+        weechat.hook_command_run("/query", "rc_command_query", "")
 
     def server(self, name):
         return self._servers[name]
@@ -661,6 +691,54 @@ class Plugin:
         )
         self.create_task(self._servers[server].connect(token))
         return weechat.WEECHAT_RC_OK
+
+
+def rc_command_query(_, buf, args):
+    server_name = weechat.buffer_get_string(buf, "localvar_server")
+    server = plugin.server(server_name)
+
+    target = args.split()[1]
+    nicks = [user._username for user in server.users.values()]
+    if target not in nicks:
+        weechat.prnt(
+            buf,
+            f"%sNo known user {target} on {server_name}" % (weechat.prefix("error")),
+        )
+        return weechat.WEECHAT_RC_ERROR
+
+    # If we fetch all rooms on connect and then keep up with the message
+    # stream, the server should always know about all of its rooms.  So we can
+    # just look there and schedule a new room to be created if necessary.
+    for buf in server.buffers.values():
+        rtype = weechat.buffer_get_string(buf, "localvar_type")
+        if rtype != "d":
+            continue
+
+        userlist = set()
+        infolist = weechat.infolist_get("nicklist", buf, "")
+        while True:
+            if not weechat.infolist_next(infolist):
+                break
+
+            type_ = weechat.infolist_string(infolist, "type")
+            if type_ != "nick":
+                continue
+
+            name = weechat.infolist_string(infolist, "name")
+            userlist.add(name)
+
+        if userlist != {server.username, target}:
+            continue
+
+        # TODO: unhide if hidden on the server
+        weechat.buffer_set(buf, "hidden", "0")
+        name = weechat.buffer_get_string(buf, "short_name")
+        weechat.command("", f"/buffer {name}")
+        break
+    else:
+        plugin.create_task(server.create_im(target))
+
+    return weechat.WEECHAT_RC_OK_EAT
 
 
 def rc_command_run_cb(cmd, buf, args):
