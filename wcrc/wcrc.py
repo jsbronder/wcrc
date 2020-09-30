@@ -558,9 +558,11 @@ class Server:
             # Nothing to do with this right now
             pass
         elif jd.get("msg") == "result":
-            if jd.get("id") in self._method_ids:
-                # We called a method and it worked
-                self._method_ids.remove(jd["id"])
+            # We called a method and it worked
+            assert jd.get("id") in self._method_ids, logging.info(
+                json.dumps(jd, sort_keys=True, indent=2)
+            )
+            self._method_ids.remove(jd["id"])
 
         elif jd.get("msg") == "ready" and jd.get("subs", []):
             # Successful subscription
