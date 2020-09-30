@@ -153,22 +153,7 @@ class Server:
         async with self.rest_post("im.create", json={"username": nick}) as resp:
             jd = await resp.json()
             assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
-            rid = jd["room"]["rid"]
-
-            async with self.rest_get(
-                "subscriptions.getOne", params={"roomId": rid}
-            ) as resp:
-                jd = await resp.json()
-                assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
-                sub = jd["subscription"]
-                buf = await self._update_buffer_from_sub(sub)
-                self._buffers[rid] = buf
-                await self._set_room_members(buf, rid)
-                logging.debug(
-                    "New room %s %s",
-                    rid,
-                    weechat.buffer_get_string(buf, "name"),
-                )
+            await self._handle_new_subscription(jd["room"]["rid"])
 
     async def toggle_hidden(self, rid, hide):
         if self._ws is None:
@@ -489,105 +474,139 @@ class Server:
             except Exception:
                 logging.exception("Exception in main loop - restarting")
 
+    async def _handle_new_subscription(self, rid):
+        async with self.rest_get(
+            "subscriptions.getOne", params={"roomId": rid}
+        ) as resp:
+            jd = await resp.json()
+            assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
+            sub = jd["subscription"]
+            buf = await self._update_buffer_from_sub(sub)
+            self._buffers[rid] = buf
+            await self._set_room_members(buf, rid)
+            logging.debug(
+                "New subscription %s",
+                weechat.buffer_get_string(buf, "name"),
+            )
+            return buf
+
     async def _process_message(self, jd):
         if jd.get("collection") == "stream-notify-user":
             return await self._handle_stream_notify_user(jd)
 
-        if (
-            jd.get("msg") == "changed"
-            and jd.get("collection") == "stream-room-messages"
-        ):
-            msg, room_meta = jd["fields"]["args"]
+        if jd.get("collection") == "stream-room-messages":
+            return await self._handle_stream_room_messages(jd)
 
-            buf = self._buffers.get(msg["rid"])
-            if buf is None:
-                async with self.rest_get(
-                    "subscriptions.getOne",
-                    params={"roomId": msg["rid"]},
-                ) as resp:
-                    jd = await resp.json()
-                    assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
+        if jd.get("collection") == "stream-notify-logged":
+            return await self._handle_stream_notify_logged(jd)
 
-                    if jd == {"success": True}:
-                        # Not actually subscribed to this channel.  Which begs
-                        # the question why the message was sent in the first
-                        # place...
-                        return
+        if jd.get("msg") == "updated" and jd.get("methods", []):
+            # Nothing to do with this right now
+            return
 
-                    sub = jd["subscription"]
-                    rid = sub["rid"]
-                    buf = await self._update_buffer_from_sub(sub)
-                    self._buffers[rid] = buf
-                    await self._set_room_members(buf, rid)
-                    logging.debug(
-                        "New room %s %s",
-                        rid,
-                        weechat.buffer_get_string(buf, "name"),
-                    )
-
-            regular_keys = sorted(
-                [
-                    "_id",
-                    "_updatedAt",
-                    "channels",
-                    "mentions",
-                    "msg",
-                    "rid",
-                    "ts",
-                    "u",
-                ]
+        if jd.get("msg") == "result":
+            # We called a method and it worked
+            assert jd.get("id") in self._method_ids, logging.info(
+                json.dumps(jd, sort_keys=True, indent=2)
             )
-            # If this is a normal message, print it.  Further handling below.
-            if sorted(msg.keys()) == regular_keys:
-                weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
-                return
+            self._method_ids.remove(jd["id"])
+            return
 
-            # Topic change
-            if msg.get("t") == "room_changed_topic":
-                prefix = weechat.prefix("network")
-                weechat.prnt(
-                    buf,
-                    f"{prefix}{msg['u']['username']} changed the topic to {msg['msg']}",
+        if jd.get("msg") == "ready" and jd.get("subs", []):
+            # Successful subscription
+            return
+
+        logging.warning(
+            "Unhandled message:\n%s", json.dumps(jd, sort_keys=True, indent=2)
+        )
+
+    async def _handle_stream_notify_user(self, jd):
+        if jd["fields"]["eventName"].endswith("subscriptions-changed"):
+            action, sub = jd["fields"]["args"]
+            assert action == "updated", json.dumps(jd, sort_keys=True, indent=2)
+
+            buf = self._buffers[sub["rid"]]
+            visible = weechat.buffer_get_integer(buf, "hidden") == 0
+            if visible != sub["open"]:
+                logging.debug(
+                    "subscription to %s %s",
+                    sub["rid"],
+                    "open" if sub["open"] else "closed",
                 )
-                return
+                weechat.buffer_set(buf, "hidden", "0" if sub["open"] else "1")
+        else:
+            logging.warning(
+                "Unhandled stream-notify-user:\n%s",
+                json.dumps(jd, sort_keys=True, indent=2),
+            )
 
-            # Added to channel
-            elif msg.get("t") == "au":
-                prefix = weechat.prefix("network")
-                weechat.prnt(
-                    buf,
-                    f"{prefix}{msg['u']['username']} added {msg['msg']} to the channel",
-                )
-                return
+    async def _handle_stream_room_messages(self, jd):
+        msg, room_meta = jd["fields"]["args"]
 
-            elif msg.get("t") == "ul":
-                prefix = weechat.prefix("network")
-                weechat.prnt(buf, f"{prefix}{msg['u']['username']} left the channel")
-                return
+        buf = self._buffers.get(msg["rid"])
+        if buf is None:
+            buf = self._handle_new_subscription(msg["rid"])
 
+        regular_keys = sorted(
+            [
+                "_id",
+                "_updatedAt",
+                "channels",
+                "mentions",
+                "msg",
+                "rid",
+                "ts",
+                "u",
+            ]
+        )
+        # If this is a normal message, print it.  Further handling below.
+        if sorted(msg.keys()) == regular_keys:
+            weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
+            return
+
+        # Topic change
+        if msg.get("t") == "room_changed_topic":
             prefix = weechat.prefix("network")
-            weechat.prnt(buf, f"{prefix}unperfectly handled message in debug buffer")
-            logging.debug("%s\n", json.dumps(jd, sort_keys=True, indent=2))
+            weechat.prnt(
+                buf,
+                f"{prefix}{msg['u']['username']} changed the topic to {msg['msg']}",
+            )
+            return
 
-            # Summarize urls
-            if msg.get("urls", [{}])[0].get("meta"):
-                prefix = weechat.prefix("network")
-                for url, meta in ((url["url"], url["meta"]) for url in msg["urls"]):
-                    weechat.prnt(buf, f"{prefix}Link: {meta['pageTitle']}")
+        # Added to channel
+        elif msg.get("t") == "au":
+            prefix = weechat.prefix("network")
+            weechat.prnt(
+                buf,
+                f"{prefix}{msg['u']['username']} added {msg['msg']} to the channel",
+            )
+            return
 
-            # TODO: Reactions
-            elif msg.get("reactions"):
-                pass
+        elif msg.get("t") == "ul":
+            prefix = weechat.prefix("network")
+            weechat.prnt(buf, f"{prefix}{msg['u']['username']} left the channel")
+            return
 
-            # TODO: Edits
-            elif msg.get("editedAt"):
-                pass
+        prefix = weechat.prefix("network")
+        weechat.prnt(buf, f"{prefix}unperfectly handled message in debug buffer")
+        logging.debug("%s\n", json.dumps(jd, sort_keys=True, indent=2))
 
-        elif (
-            jd.get("msg") == "changed"
-            and jd.get("collection") == "stream-notify-logged"
-            and jd["fields"]["eventName"] == "user-status"
-        ):
+        # Summarize urls
+        if msg.get("urls", [{}])[0].get("meta"):
+            prefix = weechat.prefix("network")
+            for url, meta in ((url["url"], url["meta"]) for url in msg["urls"]):
+                weechat.prnt(buf, f"{prefix}Link: {meta['pageTitle']}")
+
+        # TODO: Reactions
+        elif msg.get("reactions"):
+            pass
+
+        # TODO: Edits
+        elif msg.get("editedAt"):
+            pass
+
+    async def _handle_stream_notify_logged(self, jd):
+        if jd["fields"]["eventName"] == "user-status":
             int_to_status = ["offline", "online", "away", "busy"]
             uid, username, int_status, _ = jd["fields"]["args"][0]
             status = int_to_status[int_status]
@@ -609,44 +628,6 @@ class Server:
                 )
                 group = weechat.nicklist_search_group(buf, "", group_name)
                 weechat.nicklist_add_nick(buf, group, username, "", "", "", 1)
-
-        elif jd.get("msg") == "updated" and jd.get("methods", []):
-            # Nothing to do with this right now
-            pass
-        elif jd.get("msg") == "result":
-            # We called a method and it worked
-            assert jd.get("id") in self._method_ids, logging.info(
-                json.dumps(jd, sort_keys=True, indent=2)
-            )
-            self._method_ids.remove(jd["id"])
-
-        elif jd.get("msg") == "ready" and jd.get("subs", []):
-            # Successful subscription
-            pass
-        else:
-            logging.warning(
-                "Unhandled message:\n%s", json.dumps(jd, sort_keys=True, indent=2)
-            )
-
-    async def _handle_stream_notify_user(self, jd):
-        if jd["fields"]["eventName"].endswith("subscriptions-changed"):
-            action, sub = jd["fields"]["args"]
-            assert action == "updated", json.dumps(jd, sort_keys=True, indent=2)
-
-            buf = self._buffers[sub["rid"]]
-            visible = weechat.buffer_get_integer(buf, "hidden") == 0
-            if visible != sub["open"]:
-                logging.debug(
-                    "subscription to %s %s",
-                    sub["rid"],
-                    "open" if sub["open"] else "closed",
-                )
-                weechat.buffer_set(buf, "hidden", "0" if sub["open"] else "1")
-        else:
-            logging.warning(
-                "Unhandled stream-notify-user:\n%s",
-                json.dumps(jd, sort_keys=True, indent=2),
-            )
 
 
 class User:
