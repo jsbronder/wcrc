@@ -525,7 +525,63 @@ class Server:
                         weechat.buffer_get_string(buf, "name"),
                     )
 
-            weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
+            regular_keys = sorted(
+                [
+                    "_id",
+                    "_updatedAt",
+                    "channels",
+                    "mentions",
+                    "msg",
+                    "rid",
+                    "ts",
+                    "u",
+                ]
+            )
+            # If this is a normal message, print it.  Further handling below.
+            if sorted(msg.keys()) == regular_keys:
+                weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
+                return
+
+            # Topic change
+            if msg.get("t") == "room_changed_topic":
+                prefix = weechat.prefix("network")
+                weechat.prnt(
+                    buf,
+                    f"{prefix}{msg['u']['username']} changed the topic to {msg['msg']}",
+                )
+                return
+
+            # Added to channel
+            elif msg.get("t") == "au":
+                prefix = weechat.prefix("network")
+                weechat.prnt(
+                    buf,
+                    f"{prefix}{msg['u']['username']} added {msg['msg']} to the channel",
+                )
+                return
+
+            elif msg.get("t") == "ul":
+                prefix = weechat.prefix("network")
+                weechat.prnt(buf, f"{prefix}{msg['u']['username']} left the channel")
+                return
+
+            prefix = weechat.prefix("network")
+            weechat.prnt(buf, f"{prefix}unperfectly handled message in debug buffer")
+            logging.debug("%s\n", json.dumps(jd, sort_keys=True, indent=2))
+
+            # Summarize urls
+            if msg.get("urls", [{}])[0].get("meta"):
+                prefix = weechat.prefix("network")
+                for url, meta in ((url["url"], url["meta"]) for url in msg["urls"]):
+                    weechat.prnt(buf, f"{prefix}Link: {meta['pageTitle']}")
+
+            # TODO: Reactions
+            elif msg.get("reactions"):
+                pass
+
+            # TODO: Edits
+            elif msg.get("editedAt"):
+                pass
 
         elif (
             jd.get("msg") == "changed"
