@@ -170,6 +170,29 @@ class Server:
                     weechat.buffer_get_string(buf, "name"),
                 )
 
+    async def toggle_hidden(self, rid, hide):
+        if self._ws is None:
+            return
+
+        method_id = f"toggle-hidden-{rid}-{hide}"
+        if method_id in self._method_ids:
+            # Minimal effort debounce as hook_signal will make multiple calls
+            return
+
+        name = weechat.buffer_get_string(self._buffers[rid], "short_name")
+        logging.debug("%s room %s", "hiding" if hide else "unhiding", name)
+        self._method_ids.add(method_id)
+        await self.send(
+            {
+                "msg": "method",
+                "method": "hideRoom" if hide else "openRoom",
+                "id": method_id,
+                "params": [
+                    rid,
+                ],
+            }
+        )
+
     async def disconnect(self):
         if self._main_loop is not None:
             with contextlib.suppress(asyncio.CancelledError):
@@ -259,6 +282,9 @@ class Server:
             weechat.buffer_set(buf, "localvar_set_server", self._name)
             weechat.buffer_set(buf, "localvar_set_rid", rid)
             weechat.buffer_set(buf, "localvar_set_type", sub["t"])
+
+            weechat.hook_signal("buffer_hidden", "rc_signal_buffer_hidden", "")
+            weechat.hook_signal("buffer_unhidden", "rc_signal_buffer_hidden", "")
 
             for ng, color in self._nick_groups.items():
                 weechat.nicklist_add_group(buf, "", ng, color, 1)
@@ -428,7 +454,6 @@ class Server:
             ) == "ready" and f"{self._name}.stream-room-messages" in jd.get("subs", []):
                 break
 
-            logging.debug(jd)
             assert jd.get("msg") == "updated", json.dumps(jd, sort_keys=True, indent=2)
 
         self._main_loop = asyncio.create_task(self._main())
@@ -446,6 +471,15 @@ class Server:
             }
         )
 
+        await self.send(
+            {
+                "msg": "sub",
+                "id": "stream-notify-user-subscriptions-changed",
+                "name": "stream-notify-user",
+                "params": [f"{self._uid}/subscriptions-changed", False],
+            }
+        )
+
         while True:
             try:
                 jd = await self.recv()
@@ -456,6 +490,9 @@ class Server:
                 logging.exception("Exception in main loop - restarting")
 
     async def _process_message(self, jd):
+        if jd.get("collection") == "stream-notify-user":
+            return await self._handle_stream_notify_user(jd)
+
         if (
             jd.get("msg") == "changed"
             and jd.get("collection") == "stream-room-messages"
@@ -531,6 +568,26 @@ class Server:
         else:
             logging.warning(
                 "Unhandled message:\n%s", json.dumps(jd, sort_keys=True, indent=2)
+            )
+
+    async def _handle_stream_notify_user(self, jd):
+        if jd["fields"]["eventName"].endswith("subscriptions-changed"):
+            action, sub = jd["fields"]["args"]
+            assert action == "updated", json.dumps(jd, sort_keys=True, indent=2)
+
+            buf = self._buffers[sub["rid"]]
+            visible = weechat.buffer_get_integer(buf, "hidden") == 0
+            if visible != sub["open"]:
+                logging.debug(
+                    "subscription to %s %s",
+                    sub["rid"],
+                    "open" if sub["open"] else "closed",
+                )
+                weechat.buffer_set(buf, "hidden", "0" if sub["open"] else "1")
+        else:
+            logging.warning(
+                "Unhandled stream-notify-user:\n%s",
+                json.dumps(jd, sort_keys=True, indent=2),
             )
 
 
@@ -706,9 +763,10 @@ def rc_command_query(_, buf, args):
         )
         return weechat.WEECHAT_RC_ERROR
 
-    # If we fetch all rooms on connect and then keep up with the message
-    # stream, the server should always know about all of its rooms.  So we can
-    # just look there and schedule a new room to be created if necessary.
+    # If we fetch all subscriptions on connect and then keep up with the
+    # message stream, the server should always know about all of its rooms.  So
+    # we can just look there and schedule a new room to be created if
+    # necessary.
     for buf in server.buffers.values():
         rtype = weechat.buffer_get_string(buf, "localvar_type")
         if rtype != "d":
@@ -730,8 +788,6 @@ def rc_command_query(_, buf, args):
         if userlist != {server.username, target}:
             continue
 
-        # TODO: unhide if hidden on the server
-        weechat.buffer_set(buf, "hidden", "0")
         name = weechat.buffer_get_string(buf, "short_name")
         weechat.command("", f"/buffer {name}")
         break
@@ -774,6 +830,18 @@ def rc_server_run_cb(cmd, buf, args):
             )
 
         return weechat.WEECHAT_RC_OK_EAT
+
+
+def rc_signal_buffer_hidden(_, signal, buf):
+    hide = signal == "buffer_hidden"
+    server_name = weechat.buffer_get_string(buf, "localvar_server")
+    if not server_name:
+        return weechat.WEECHAT_RC_ERROR
+
+    server = plugin.server(server_name)
+    rid = weechat.buffer_get_string(buf, "localvar_rid")
+    plugin.create_task(server.toggle_hidden(rid, hide))
+    return weechat.WEECHAT_RC_OK
 
 
 def rc_command_cb(_, buf, args):
