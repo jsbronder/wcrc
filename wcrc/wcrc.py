@@ -264,6 +264,11 @@ class Server:
             weechat.buffer_set(buf, "notify", "2")
             weechat.buffer_set(buf, "short_name", name)
             weechat.buffer_set(buf, "nicklist", "1")
+            weechat.buffer_set(
+                buf,
+                "highlight_words_add",
+                ",".join((self._username, f"@{self._username}", "@all", "@here")),
+            )
             weechat.buffer_set(buf, "localvar_set_server", self._name)
             weechat.buffer_set(buf, "localvar_set_rid", rid)
             weechat.buffer_set(buf, "localvar_set_type", sub["t"])
@@ -562,6 +567,21 @@ class Server:
         # If this is a normal message, print it.  Further handling below.
         if sorted(msg.keys()) == regular_keys:
             weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
+
+            level = weechat.WEECHAT_HOTLIST_MESSAGE
+            if weechat.buffer_get_string(buf, "localvar_type") in ("p", "d"):
+                level = weechat.WEECHAT_HOTLIST_PRIVATE
+
+            mentioned = [u["username"] for u in msg.get("mentions", [])]
+            if mentioned:
+                highlight_on = [self._username, "all"]
+                if weechat.buffer_get_integer(buf, "hidden") == 0:
+                    highlight_on.append("here")
+
+                if any(u in mentioned for u in highlight_on):
+                    level = weechat.WEECHAT_HOTLIST_HIGHLIGHT
+
+            weechat.buffer_set(buf, "hotlist", level)
             return
 
         # Topic change
