@@ -178,6 +178,23 @@ class Server:
             }
         )
 
+    async def mark_read(self, rid):
+        if self._ws is None:
+            return
+
+        method_id = uuid.uuid4().hex
+        self._method_ids.add(method_id)
+        await self.send(
+            {
+                "msg": "method",
+                "method": "readMessages",
+                "id": method_id,
+                "params": [
+                    rid,
+                ],
+            }
+        )
+
     async def disconnect(self):
         if self._main_loop is not None:
             with contextlib.suppress(asyncio.CancelledError):
@@ -275,6 +292,7 @@ class Server:
 
             weechat.hook_signal("buffer_hidden", "rc_signal_buffer_hidden", "")
             weechat.hook_signal("buffer_unhidden", "rc_signal_buffer_hidden", "")
+            weechat.hook_signal("buffer_switch", "rc_signal_buffer_switch", "")
 
             for ng, color in self._nick_groups.items():
                 weechat.nicklist_add_group(buf, "", ng, color, 1)
@@ -567,6 +585,9 @@ class Server:
         # If this is a normal message, print it.  Further handling below.
         if sorted(msg.keys()) == regular_keys:
             weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
+
+            if weechat.current_buffer() == buf:
+                await self.mark_read(msg["rid"])
 
             level = weechat.WEECHAT_HOTLIST_MESSAGE
             if weechat.buffer_get_string(buf, "localvar_type") in ("p", "d"):
@@ -900,6 +921,17 @@ def rc_signal_buffer_hidden(_, signal, buf):
     server = plugin.server(server_name)
     rid = weechat.buffer_get_string(buf, "localvar_rid")
     plugin.create_task(server.toggle_hidden(rid, hide))
+    return weechat.WEECHAT_RC_OK
+
+
+def rc_signal_buffer_switch(_, __, buf):
+    server_name = weechat.buffer_get_string(buf, "localvar_server")
+    if not server_name:
+        return weechat.WEECHAT_RC_ERROR
+
+    server = plugin.server(server_name)
+    rid = weechat.buffer_get_string(buf, "localvar_rid")
+    plugin.create_task(server.mark_read(rid))
     return weechat.WEECHAT_RC_OK
 
 
