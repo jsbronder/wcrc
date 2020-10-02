@@ -383,6 +383,18 @@ class Server:
                 f"{msg['u']['username']}\t{msg['msg']}",
             )
 
+            reactions = " ".join(
+                f"{k}{len(v['usernames'])}" for k, v in msg.get("reactions", {}).items()
+            )
+            if reactions:
+                reactions = f"{weechat.prefix('network')}{reactions}"
+            weechat.prnt_date_tags(
+                buf,
+                int(ts.timestamp()),
+                f"{tags},rcid_{msg['_id']},rc_statusline",
+                f"\t\t{reactions}",
+            )
+
         logging.debug(
             "Loaded %s messages to '%s' backlog",
             len(stack),
@@ -607,6 +619,13 @@ class Server:
                 f"{msg['u']['username']}\t{msg['msg']}",
             )
 
+            weechat.prnt_date_tags(
+                buf,
+                ts,
+                f"rcid_{msg['_id']},rc_statusline",
+                "\t\t",
+            )
+
             if weechat.current_buffer() == buf:
                 await self.mark_read(msg["rid"])
 
@@ -626,6 +645,8 @@ class Server:
             weechat.buffer_set(buf, "hotlist", level)
             return
 
+        action_taken = self._update_msg_reactions(buf, msg)
+
         # Topic change
         if msg.get("t") == "room_changed_topic":
             prefix = weechat.prefix("network")
@@ -633,35 +654,32 @@ class Server:
                 buf,
                 f"{prefix}{msg['u']['username']} changed the topic to {msg['msg']}",
             )
-            return
+            action_taken = True
 
         # Added to channel
-        elif msg.get("t") == "au":
+        if msg.get("t") == "au":
             prefix = weechat.prefix("network")
             weechat.prnt(
                 buf,
                 f"{prefix}{msg['u']['username']} added {msg['msg']} to the channel",
             )
-            return
+            action_taken = True
 
-        elif msg.get("t") == "ul":
+        if msg.get("t") == "ul":
             prefix = weechat.prefix("network")
             weechat.prnt(buf, f"{prefix}{msg['u']['username']} left the channel")
-            return
+            action_taken = True
 
-        prefix = weechat.prefix("network")
-        weechat.prnt(buf, f"{prefix}unperfectly handled message in debug buffer")
-        logging.debug("%s\n", json.dumps(jd, sort_keys=True, indent=2))
+        if not action_taken:
+            prefix = weechat.prefix("network")
+            weechat.prnt(buf, f"{prefix}unperfectly handled message in debug buffer")
+            logging.debug("%s\n", json.dumps(jd, sort_keys=True, indent=2))
 
         # Summarize urls
         if msg.get("urls", [{}])[0].get("meta"):
             prefix = weechat.prefix("network")
             for url, meta in ((url["url"], url["meta"]) for url in msg["urls"]):
                 weechat.prnt(buf, f"{prefix}Link: {meta['pageTitle']}")
-
-        # TODO: Reactions
-        elif msg.get("reactions"):
-            pass
 
         # TODO: Edits
         elif msg.get("editedAt"):
@@ -690,6 +708,58 @@ class Server:
                 )
                 group = weechat.nicklist_search_group(buf, "", group_name)
                 weechat.nicklist_add_nick(buf, group, username, "", "", "", 1)
+
+    def _update_msg_reactions(self, buf, msg):
+        """
+        Potentially update the reactions to a message.
+
+        @param buf  - weechat buffer
+        @param msg  - rocketchat message json
+
+        @return - True if there was an update, False otherwise
+        """
+        reactions = {
+            k: len(v["usernames"]) for k, v in msg.get("reactions", {}).items()
+        }
+
+        def match_line(ptr):
+            ptr = weechat.hdata_pointer(hdata.line, ptr, "data")
+            tags = [
+                weechat.hdata_string(hdata.line_data, ptr, f"{i}|tags_array")
+                for i in range(
+                    weechat.hdata_integer(hdata.line_data, ptr, "tags_count")
+                )
+            ]
+            return all(k in tags for k in ("rc_statusline", f"rcid_{msg['_id']}"))
+
+        lines = weechat.hdata_pointer(hdata.buffer, buf, "lines")
+        ptr = weechat.hdata_pointer(hdata.lines, lines, "last_line")
+
+        while ptr and not match_line(ptr):
+            ptr = weechat.hdata_move(hdata.line, ptr, -1)
+
+        if ptr:
+            ptr = weechat.hdata_pointer(hdata.line, ptr, "data")
+
+            new_message = ""
+            if reactions:
+                new_message = "%s\t\t%s" % (
+                    weechat.prefix("network"),
+                    " ".join(f"{k}{v}" for k, v in reactions.items()),
+                )
+
+            current_message = weechat.hdata_string(hdata.line_data, ptr, "message")
+            if new_message != current_message:
+                weechat.hdata_update(
+                    hdata.line_data,
+                    ptr,
+                    {"message": new_message},
+                )
+                return True
+        else:
+            logging.warning("No match for reactions on msg %s", msg["_id"])
+
+        return False
 
 
 class User:
@@ -1005,6 +1075,9 @@ def main():
         "rc_command_cb",
         "",
     )
+
+    # TODO: can we automatically add a filter for empty reaction lines?
+    # /filter add empty_rc_statusline * rc_statusline ^$
 
     return
 
