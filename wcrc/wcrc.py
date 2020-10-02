@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import concurrent
 import contextlib
 import datetime
@@ -14,6 +15,7 @@ import weechat
 
 loop = None
 plugin = None
+hdata = None
 
 
 def tick(*args):
@@ -375,7 +377,10 @@ class Server:
             ts += ts.astimezone().utcoffset()
 
             weechat.prnt_date_tags(
-                buf, int(ts.timestamp()), tags, f"{msg['u']['username']}\t{msg['msg']}"
+                buf,
+                int(ts.timestamp()),
+                f"{tags},rcid_{msg['_id']}",
+                f"{msg['u']['username']}\t{msg['msg']}",
             )
 
         logging.debug(
@@ -570,21 +575,37 @@ class Server:
         if buf is None:
             buf = self._handle_new_subscription(msg["rid"])
 
-        regular_keys = sorted(
-            [
-                "_id",
-                "_updatedAt",
-                "channels",
-                "mentions",
-                "msg",
-                "rid",
-                "ts",
-                "u",
-            ]
-        )
-        # If this is a normal message, print it.  Further handling below.
-        if sorted(msg.keys()) == regular_keys:
-            weechat.prnt(buf, f"{msg['u']['username']}\t{msg['msg']}")
+        # TODO:  This is probably not the most performant thing to do, if that
+        # becomes an issue this is a good place to look.  But, until then,
+        # keeping as much data in weechat as possible is definitely convenient.
+        def is_msg_update():
+            def match_msg_id(ptr):
+                ptr = weechat.hdata_pointer(hdata.line, ptr, "data")
+                for i in range(
+                    weechat.hdata_integer(hdata.line_data, ptr, "tags_count")
+                ):
+                    tag = weechat.hdata_string(hdata.line_data, ptr, f"{i}|tags_array")
+                    if tag == f"rcid_{msg['_id']}":
+                        return True
+                return False
+
+            lines = weechat.hdata_pointer(hdata.buffer, buf, "lines")
+            ptr = weechat.hdata_pointer(hdata.lines, lines, "last_line")
+
+            while ptr and not match_msg_id(ptr):
+                ptr = weechat.hdata_move(hdata.line, ptr, -1)
+
+            return bool(ptr)
+
+        if not is_msg_update():
+            ts = msg["ts"]["$date"] // 1000
+
+            weechat.prnt_date_tags(
+                buf,
+                ts,
+                f"rcid_{msg['_id']}",
+                f"{msg['u']['username']}\t{msg['msg']}",
+            )
 
             if weechat.current_buffer() == buf:
                 await self.mark_read(msg["rid"])
@@ -959,6 +980,14 @@ def main():
         "rocket_chat", "on_buf_input", "debug-buffer", "on_buf_closed", "debug-buffer"
     )
     setup_logging(rcbuf, level=logging.DEBUG)
+
+    global hdata
+    hdata = collections.namedtuple("hdata", "buffer lines line line_data message")(
+        **{
+            n: weechat.hdata_get(n)
+            for n in ("buffer", "lines", "line", "line_data", "message")
+        }
+    )
 
     global loop
     loop = WeechatLoop()
