@@ -351,7 +351,7 @@ class Server:
             "p": "groups.history",
         }[rtype]
 
-        tags = ",".join(("notify_none", "no_highlight", "logger_backlog"))
+        init_tags = ["notify_none", "no_highlight", "logger_backlog"]
         stack = []
         params = {"roomId": rid, "unreads": "true", "count": 50}
         if oldest_ts is not None:
@@ -372,27 +372,38 @@ class Server:
 
         stack.reverse()
         for msg in stack:
-            msg_ts = msg.get("editedAt", msg["ts"]).rstrip("Z")
-            ts = datetime.datetime.fromisoformat(msg_ts)
-            ts += ts.astimezone().utcoffset()
+            edited = "editedAt" in msg
+
+            ts = datetime.datetime.fromisoformat(
+                (msg["editedAt"] if edited else msg["ts"]).rstrip("Z")
+            )
+            ts = (ts + ts.astimezone().utcoffset()).timestamp()
+
+            tags = init_tags[:]
+            tags.append(f"rcid_{msg['_id']}")
 
             weechat.prnt_date_tags(
                 buf,
-                int(ts.timestamp()),
-                f"{tags},rcid_{msg['_id']}",
+                int(ts),
+                ",".join(tags),
                 f"{msg['u']['username']}\t{msg['msg']}",
             )
 
-            reactions = " ".join(
+            msgs = []
+            tags.append("rc_statusline")
+            if edited:
+                msgs.append("[edited]")
+                tags.append(f"rcedit_{int(ts * 1000)}")
+
+            msgs.extend(
                 f"{k}{len(v['usernames'])}" for k, v in msg.get("reactions", {}).items()
             )
-            if reactions:
-                reactions = f"{weechat.prefix('network')}{reactions}"
+
             weechat.prnt_date_tags(
                 buf,
-                int(ts.timestamp()),
-                f"{tags},rcid_{msg['_id']},rc_statusline",
-                f"\t\t{reactions}",
+                int(ts),
+                ",".join(tags),
+                f"\t\t{weechat.prefix('network')}{' '.join(msgs)}" if msgs else "",
             )
 
         logging.debug(
@@ -676,14 +687,13 @@ class Server:
                 weechat.prnt(buf, f"{prefix}Link: {meta['pageTitle']}")
             action_taken = True
 
+        if "editedAt" in msg:
+            action_taken |= self._update_msg_text(buf, msg)
+
         if not action_taken:
             prefix = weechat.prefix("network")
             weechat.prnt(buf, f"{prefix}unperfectly handled message in debug buffer")
             logging.debug("%s\n", json.dumps(jd, sort_keys=True, indent=2))
-
-        # TODO: Edits
-        elif msg.get("editedAt"):
-            pass
 
     async def _handle_stream_notify_logged(self, jd):
         if jd["fields"]["eventName"] == "user-status":
@@ -709,6 +719,32 @@ class Server:
                 group = weechat.nicklist_search_group(buf, "", group_name)
                 weechat.nicklist_add_nick(buf, group, username, "", "", "", 1)
 
+    def _line_tags(self, buf):
+        """
+        Iterator yielding line hdata and tags from newest to oldest in a buffer.
+
+        @param buf  - buffer to iterate on
+
+        @yield - tuple of line hdata pointers and tags
+        """
+        lines = weechat.hdata_pointer(hdata.buffer, buf, "lines")
+        line_ptr = weechat.hdata_pointer(hdata.lines, lines, "last_line")
+
+        while line_ptr:
+            line_data = weechat.hdata_pointer(hdata.line, line_ptr, "data")
+            if not line_data:
+                return
+
+            tags = [
+                weechat.hdata_string(hdata.line_data, line_data, f"{i}|tags_array")
+                for i in range(
+                    weechat.hdata_integer(hdata.line_data, line_data, "tags_count")
+                )
+            ]
+            yield (line_data, tags)
+
+            line_ptr = weechat.hdata_move(hdata.line, line_ptr, -1)
+
     def _update_msg_reactions(self, buf, msg):
         """
         Potentially update the reactions to a message.
@@ -722,44 +758,84 @@ class Server:
             k: len(v["usernames"]) for k, v in msg.get("reactions", {}).items()
         }
 
-        def match_line(ptr):
-            ptr = weechat.hdata_pointer(hdata.line, ptr, "data")
-            tags = [
-                weechat.hdata_string(hdata.line_data, ptr, f"{i}|tags_array")
-                for i in range(
-                    weechat.hdata_integer(hdata.line_data, ptr, "tags_count")
-                )
-            ]
-            return all(k in tags for k in ("rc_statusline", f"rcid_{msg['_id']}"))
-
-        lines = weechat.hdata_pointer(hdata.buffer, buf, "lines")
-        ptr = weechat.hdata_pointer(hdata.lines, lines, "last_line")
-
-        while ptr and not match_line(ptr):
-            ptr = weechat.hdata_move(hdata.line, ptr, -1)
-
-        if ptr:
-            ptr = weechat.hdata_pointer(hdata.line, ptr, "data")
-
-            new_message = ""
-            if reactions:
-                new_message = "%s\t\t%s" % (
-                    weechat.prefix("network"),
-                    " ".join(f"{k}{v}" for k, v in reactions.items()),
-                )
-
-            current_message = weechat.hdata_string(hdata.line_data, ptr, "message")
-            if new_message != current_message:
-                weechat.hdata_update(
-                    hdata.line_data,
-                    ptr,
-                    {"message": new_message},
-                )
-                return True
+        for line, tags in self._line_tags(buf):
+            if all(k in tags for k in ("rc_statusline", f"rcid_{msg['_id']}")):
+                break
         else:
             logging.warning("No match for reactions on msg %s", msg["_id"])
+            return False
 
-        return False
+        new_message = ""
+        if reactions:
+            new_message = "%s%s%s" % (
+                weechat.prefix("network"),
+                "[edited] " if any(t.startswith("rcedit_") for t in tags) else "",
+                " ".join(f"{k}{v}" for k, v in reactions.items()),
+            )
+
+        current_message = weechat.hdata_string(hdata.line_data, line, "message")
+        if new_message == current_message:
+            return False
+
+        weechat.hdata_update(hdata.line_data, line, {"message": new_message})
+        return True
+
+    def _update_msg_text(self, buf, msg):
+        """
+        Potentially update the contents of message.
+
+        @param buf  - weechat buffer
+        @param msg  - rocketchat message json
+
+        @return - True if there was an update, False otherwise
+        """
+        edited_ts = msg["editedAt"]["$date"]
+
+        for ld, tags in self._line_tags(buf):
+            if f"rcid_{msg['_id']}" in tags:
+                break
+        else:
+            logging.warning("No match for edited msg %s", msg["_id"])
+            return False
+
+        last_edit = next(
+            (t.split("_")[1] for t in tags if t.startswith("rcedit_")), None
+        )
+        if last_edit is None:
+            prefix = weechat.prefix("network")
+            current = weechat.hdata_string(hdata.line_data, ld, "message")
+            index = current.find(prefix) + len(prefix)
+            new_msg = f"{prefix}[edited] {current[index:]}"
+            weechat.hdata_update(hdata.line_data, ld, {"message": new_msg})
+        elif int(last_edit) == edited_ts:
+            return False
+
+        logging.debug("Updating message %s", msg["_id"])
+
+        new_tags = [t for t in tags if not t.startswith("rcedit_")]
+        new_tags.append(f"rcedit_{edited_ts}")
+        weechat.hdata_update(hdata.line_data, ld, {"tags_array": ",".join(new_tags)})
+
+        lds = []
+        for ld, tags in self._line_tags(buf):
+            if f"rcid_{msg['_id']}" in tags:
+                lds.append(ld)
+            elif lds:
+                break
+
+        # Drop the first (statusline) and reverse to match message order
+        lds = lds[:0:-1]
+
+        # We can't add new lines so tag whatever remains to the last
+        # TODO: if this was the last message we can clear them all and re-print
+        new_msgs = [
+            m.replace("\n", " <cr> ") for m in msg["msg"].split("\n", len(lds) - 1)
+        ]
+
+        for m, ld in zip(new_msgs, lds):
+            weechat.hdata_update(hdata.line_data, ld, {"message": m})
+
+        return True
 
 
 class User:
