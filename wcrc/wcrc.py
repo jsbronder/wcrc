@@ -1130,7 +1130,7 @@ def unload_plugin():
     global plugin
     try:
         plugin.shutdown()
-    except:
+    except Exception:
         return weechat.WEECHAT_RC_ERROR
     return weechat.WEECHAT_RC_OK
 
