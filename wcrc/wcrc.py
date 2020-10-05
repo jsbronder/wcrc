@@ -896,6 +896,14 @@ class Plugin:
     def create_task(self, task):
         return self._loop.create_task(task)
 
+    def shutdown(self):
+        self._loop.disconnect()
+
+        async def go():
+            await asyncio.gather(*[s.disconnect() for s in self._servers.values()])
+
+        asyncio.run(go())
+
     def cmd_help(self, buf, *args):
         weechat.prnt(buf, f"help: command: {args}")
         return weechat.WEECHAT_RC_OK
@@ -1118,6 +1126,15 @@ def rc_command_cb(_, buf, args):
     return getattr(plugin, f"cmd_{cmd}", plugin.cmd_help)(buf, *args)
 
 
+def unload_plugin():
+    global plugin
+    try:
+        plugin.shutdown()
+    except:
+        return weechat.WEECHAT_RC_ERROR
+    return weechat.WEECHAT_RC_OK
+
+
 def main():
     weechat.register(
         "wcrc",
@@ -1125,7 +1142,7 @@ def main():
         "0.0.1",
         "BSD",
         "Rocketchat compatibility",
-        "",
+        "unload_plugin",
         "",
     )
     rcbuf = weechat.buffer_new(
