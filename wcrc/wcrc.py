@@ -342,7 +342,7 @@ class Server:
                     nicklist = groups[status]
                     weechat.nicklist_add_nick(buf, nicklist, name, "", "", "", 1)
 
-    async def _set_room_history(self, buf, rid, oldest_ts):
+    async def _set_room_history(self, buf, rid, last_seen):
         rtype = weechat.buffer_get_string(buf, "localvar_type")
 
         url = {
@@ -354,9 +354,11 @@ class Server:
         init_tags = ["notify_none", "no_highlight", "logger_backlog"]
         stack = []
         params = {"roomId": rid, "unreads": "true", "count": 50}
-        if oldest_ts is not None:
-            params["oldest"] = oldest_ts
+        params["oldest"] = last_seen
 
+        # Get chunks of messages until we've pulled the last one seen by the
+        # user.  After that get one more chunk just to ensure we have the
+        # backlog reasonably filled.
         while True:
             async with self.rest_get(url, params=params) as resp:
                 jd = await resp.json()
@@ -365,8 +367,12 @@ class Server:
                 msgs = jd.get("messages", [])
                 stack.extend(msgs)
 
-                if jd.get("unreadNotLoaded", 0) == 0:
+                if "unreadNotLoaded" not in jd:
                     break
+
+                if jd["unreadNotLoaded"] == 0:
+                    del params["unreads"]
+                    del params["oldest"]
 
                 params["offset"] = len(stack)
 
@@ -446,7 +452,7 @@ class Server:
                 self._buffers[rid] = buf
 
                 await self._set_room_members(buf, rid)
-                await self._set_room_history(buf, rid, sub.get("ts"))
+                await self._set_room_history(buf, rid, sub["ls"])
 
         self._ws = await self._session.ws_connect(f"{self._ws_uri}")
 
