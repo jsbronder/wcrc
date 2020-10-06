@@ -886,7 +886,8 @@ class Plugin:
                 self._connect(server)
             logging.debug("Loaded config for %s", server)
 
-        weechat.hook_command_run("/connect", "rc_command_run_cb", "connect")
+        weechat.hook_command_run("/connect", "rc_plugin_run_cb", "connect")
+        weechat.hook_command_run("/disconnect", "rc_plugin_run_cb", "disconnect")
         weechat.hook_command_run("/users", "rc_server_run_cb", "users")
         weechat.hook_command_run("/query", "rc_command_query", "")
 
@@ -908,7 +909,7 @@ class Plugin:
         weechat.prnt(buf, f"help: command: {args}")
         return weechat.WEECHAT_RC_OK
 
-    def cmd_connect(self, buf, *args):
+    def connect(self, buf, *args):
         if not args:
             weechat.prnt(buf, "Missing server name")
             return weechat.WEECHAT_RC_OK
@@ -920,7 +921,7 @@ class Plugin:
         self._connect(args[0])
         return weechat.WEECHAT_RC_OK_EAT
 
-    def cmd_disconnect(self, buf, *args):
+    def disconnect(self, buf, *args):
         if not args:
             weechat.prnt(buf, "Missing server name")
             return weechat.WEECHAT_RC_OK
@@ -930,14 +931,12 @@ class Plugin:
             weechat.prnt(buf, f"Unknown server '{args[0]}'")
             return weechat.WEECHAT_RC_OK
 
-        if name in self._servers:
-            t = self.create_task(self._servers[name].disconnect())
-            t.add_done_callback(lambda _: self._servers.pop(name))
-            return weechat.WEECHAT_RC_OK
-        else:
+        if name not in self._servers:
             weechat.prnt(buf, f"server '{args[0]}' not connected")
             return weechat.WEECHAT_RC_OK
 
+        t = self.create_task(self._servers[name].disconnect())
+        t.add_done_callback(lambda _: self._servers.pop(name))
         return weechat.WEECHAT_RC_OK_EAT
 
     def cmd_server(self, buf, *args):
@@ -1114,6 +1113,16 @@ def rc_signal_buffer_switch(_, __, buf):
     rid = weechat.buffer_get_string(buf, "localvar_rid")
     plugin.create_task(server.mark_read(rid))
     return weechat.WEECHAT_RC_OK
+
+
+def rc_plugin_run_cb(cmd, buf, args):
+    args = args.split()[1:]
+    if cmd == "connect":
+        return plugin.connect(buf, *args)
+    elif cmd == "disconnect":
+        return plugin.disconnect(buf, *args)
+    else:
+        return weechat.WEECHAT_RC_OK
 
 
 def rc_command_cb(_, buf, args):
