@@ -1,0 +1,11 @@
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv-3*
+
+*.sw[po]
+.python-version
+__pycache__
+.devrc-*
+.eggs/
