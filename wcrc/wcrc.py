@@ -959,6 +959,7 @@ class Plugin:
             weechat.config_set_plugin(f"servers.{server}.port", str(port))
             weechat.config_set_plugin(f"servers.{server}.token", token)
             weechat.config_set_plugin(f"servers.{server}.autoconnect", "0")
+            weechat.config_set_plugin(f"servers.{server}.ssl", "1")
 
             weechat.prnt(buf, f"Added rocketchat server {server} at {host}:{port}")
 
@@ -992,6 +993,7 @@ class Plugin:
             weechat.config_unset_plugin(f"servers.{server}.port")
             weechat.config_unset_plugin(f"servers.{server}.token")
             weechat.config_unset_plugin(f"servers.{server}.autoconnect")
+            weechat.config_unset_plugin(f"servers.{server}.ssl")
 
             weechat.prnt(buf, f"Removed rocketchat server {server}")
 
@@ -1001,12 +1003,13 @@ class Plugin:
         host = weechat.config_get_plugin(f"servers.{server}.host")
         port = weechat.config_get_plugin(f"servers.{server}.port")
         token = weechat.config_get_plugin(f"servers.{server}.token")
+        ssl = weechat.config_get_plugin(f"servers.{server}.ssl") != "0"
         logging.debug("Connecting to %s", server)
 
         self._servers[server] = Server(
-            name=server, uri=f"{host}:{port}", ssl=False, loop=self._loop, plugin=self
+            name=server, uri=f"{host}:{port}", ssl=ssl, loop=self._loop, plugin=self
         )
-        self.create_task(self._servers[server].connect(token))
+        self._loop.run_until_complete(self._servers[server].connect(token))
         return weechat.WEECHAT_RC_OK
 
 
