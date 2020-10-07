@@ -385,7 +385,8 @@ class Server:
 
         stack.reverse()
         for msg in stack:
-            edited = "editedAt" in msg
+            # Value can be null
+            edited = msg.get("editedAt") is not None
 
             ts = datetime.datetime.fromisoformat(
                 (msg["editedAt"] if edited else msg["ts"]).rstrip("Z")
@@ -408,9 +409,11 @@ class Server:
                 msgs.append("[edited]")
                 tags.append(f"rcedit_{int(ts * 1000)}")
 
-            msgs.extend(
-                f"{k}{len(v['usernames'])}" for k, v in msg.get("reactions", {}).items()
-            )
+            # Value can be null
+            if msg.get("reactions") is not None:
+                msgs.extend(
+                    f"{k}{len(v['usernames'])}" for k, v in msg["reactions"].items()
+                )
 
             weechat.prnt_date_tags(
                 buf,
