@@ -327,12 +327,17 @@ class Server:
             async with self.rest_get("rooms.info", params={"roomId": rid}) as resp:
                 jd = await resp.json()
                 assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
-                for uid in jd["room"]["uids"]:
-                    user = self._users[uid]
-                    nicklist = groups[user._status]
-                    weechat.nicklist_add_nick(
-                        buf, nicklist, user._username, "", "", "", 1
-                    )
+                for i, uid in enumerate(jd["room"]["uids"]):
+                    try:
+                        user = self._users[uid]
+                    except KeyError:
+                        username = jd["room"]["usernames"][i]
+                        nicklist = groups["offline"]
+                    else:
+                        username = user._username
+                        nicklist = groups[user._status]
+
+                    weechat.nicklist_add_nick(buf, nicklist, username, "", "", "", 1)
 
         elif rtype == "p":
             async with self.rest_get("groups.members", params={"roomId": rid}) as resp:
