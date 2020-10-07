@@ -277,6 +277,8 @@ class Server:
                 name = f"#{sub['name']}"
             elif sub["t"] == "d":
                 name = sub["name"]
+            else:
+                assert False, json.dumps(sub, sort_keys=True, indent=2)
 
             buf = weechat.buffer_new(name, "on_buf_input", "", "on_buf_closed", "")
 
