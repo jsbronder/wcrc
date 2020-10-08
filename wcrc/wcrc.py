@@ -950,6 +950,15 @@ class Plugin:
             weechat.prnt(buf, f"Unknown server '{args[0]}'")
             return weechat.WEECHAT_RC_OK
 
+        if (
+            args[0] in self._servers
+            and self._servers[args[0]]._state != ServerState.DISCONNECTED
+        ):
+            weechat.prnt(
+                buf, f"{args[0]}is already {self._servers[args[0]]._state.name}"
+            )
+            return weechat.WEECHAT_RC_OK_EAT
+
         self._connect(args[0])
         return weechat.WEECHAT_RC_OK_EAT
 
