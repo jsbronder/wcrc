@@ -104,6 +104,16 @@ def setup_logging(wbuf, level=logging.WARNING):
     log.setLevel(level)
     log.addHandler(h)
 
+    logfile = weechat.config_get_plugin("logfile")
+    if logfile:
+        h = logging.FileHandler(logfile, mode="a")
+        h.setFormatter(
+            logging.Formatter(
+                fmt="%(asctime)-23s %(name)s %(levelname)s[%(lineno)d]: %(message)s"
+            )
+        )
+        log.addHandler(h)
+
     logging.getLogger("asyncio").setLevel(logging.INFO)
 
 
@@ -1182,6 +1192,7 @@ def unload_plugin():
     try:
         plugin.shutdown()
     except Exception:
+        logging.exception("Error during plugin unloading")
         return weechat.WEECHAT_RC_ERROR
     return weechat.WEECHAT_RC_OK
 
