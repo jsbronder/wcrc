@@ -586,6 +586,13 @@ class Server:
         ) as resp:
             jd = await resp.json()
             assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
+
+            if jd == {"success": True}:
+                # Not actually subscribed which happens as __my_messages__
+                # appears to give notifications for every public channel
+                # regardless of membership.
+                return None
+
             sub = jd["subscription"]
             buf = await self._update_buffer_from_sub(sub)
             self._buffers[rid] = buf
@@ -649,6 +656,8 @@ class Server:
         buf = self._buffers.get(msg["rid"])
         if buf is None:
             buf = await self._handle_new_subscription(msg["rid"])
+            if buf is None:
+                return
 
         # TODO:  This is probably not the most performant thing to do, if that
         # becomes an issue this is a good place to look.  But, until then,
