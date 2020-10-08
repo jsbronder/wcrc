@@ -109,7 +109,8 @@ def setup_logging(wbuf, level=logging.WARNING):
 
 class ServerState(enum.Enum):
     DISCONNECTED = 0
-    CONNECTED = 1
+    DISCONNECTING = 1
+    CONNECTED = 2
 
 
 class Server:
@@ -129,6 +130,7 @@ class Server:
 
         self._state = ServerState.DISCONNECTED
         self._buffers = {}
+        self._buffer_hooks = collections.defaultdict(list)
         self._method_ids = set()
 
         # All set during connect()
@@ -161,27 +163,35 @@ class Server:
             assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
             await self._handle_new_subscription(jd["room"]["rid"])
 
-    async def toggle_hidden(self, rid, hide):
-        if self._ws is None:
+    def close_buffer(self, buf):
+        if self._state == ServerState.DISCONNECTING:
             return
 
-        method_id = f"toggle-hidden-{rid}-{hide}"
+        rid = weechat.buffer_get_string(buf, "localvar_rid")
+
+        method_id = f"closing-buffer-{rid}"
         if method_id in self._method_ids:
             # Minimal effort debounce as hook_signal will make multiple calls
             return
 
-        name = weechat.buffer_get_string(self._buffers[rid], "short_name")
-        logging.debug("%s room %s", "hiding" if hide else "unhiding", name)
+        for hook in self._buffer_hooks[rid]:
+            weechat.unhook(hook)
+
+        del self._buffers[rid]
+        del self._buffer_hooks[rid]
+
         self._method_ids.add(method_id)
-        await self.send(
-            {
-                "msg": "method",
-                "method": "hideRoom" if hide else "openRoom",
-                "id": method_id,
-                "params": [
-                    rid,
-                ],
-            }
+        self._plugin.create_task(
+            self.send(
+                {
+                    "msg": "method",
+                    "method": "hideRoom",
+                    "id": method_id,
+                    "params": [
+                        rid,
+                    ],
+                }
+            )
         )
 
     async def mark_read(self, rid):
@@ -202,21 +212,29 @@ class Server:
         )
 
     async def disconnect(self):
+        self._state = ServerState.DISCONNECTING
+
+        rids = list(self._buffers.keys())
+        for rid in rids:
+            for hook in self._buffer_hooks[rid]:
+                weechat.unhook(hook)
+            del self._buffer_hooks[rid]
+
+            buf = self._buffers.pop(rid)
+            weechat.buffer_close(buf)
+
         if self._main_loop is not None:
+            self._main_loop.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                self._main_loop.cancel()
                 await self._main_loop
             self._main_loop = None
 
         await self._ws.close()
-        await self._session.close()
-
-        rids = list(self._buffers.keys())
-        for rid in rids:
-            buf = self._buffers.pop(rid)
-            weechat.buffer_close(buf)
-
         self._ws = None
+
+        await self._session.close()
+        self._session = None
+
         self._state = ServerState.DISCONNECTED
 
     async def recv(self):
@@ -298,14 +316,18 @@ class Server:
             weechat.buffer_set(buf, "localvar_set_rid", rid)
             weechat.buffer_set(buf, "localvar_set_type", sub["t"])
 
-            weechat.hook_signal("buffer_hidden", "rc_signal_buffer_hidden", "")
-            weechat.hook_signal("buffer_unhidden", "rc_signal_buffer_hidden", "")
-            weechat.hook_signal("buffer_switch", "rc_signal_buffer_switch", "")
+            self._buffer_hooks[rid].extend(
+                [
+                    weechat.hook_signal(
+                        "buffer_closing", "rc_signal_buffer_closing", ""
+                    ),
+                    weechat.hook_signal("buffer_switch", "rc_signal_buffer_switch", ""),
+                ]
+            )
 
             for ng, color in self._nick_groups.items():
                 weechat.nicklist_add_group(buf, "", ng, color, 1)
 
-        weechat.buffer_set(buf, "hidden", "0" if sub["open"] else "1")
         return buf
 
     async def _set_room_members(self, buf, rid):
@@ -461,6 +483,9 @@ class Server:
             jd = await resp.json()
             assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
             for sub in jd["update"]:
+                if not sub["open"]:
+                    continue
+
                 rid = sub["rid"]
                 buf = await self._update_buffer_from_sub(sub)
                 self._buffers[rid] = buf
@@ -596,15 +621,12 @@ class Server:
             action, sub = jd["fields"]["args"]
             assert action == "updated", json.dumps(jd, sort_keys=True, indent=2)
 
-            buf = self._buffers[sub["rid"]]
-            visible = weechat.buffer_get_integer(buf, "hidden") == 0
-            if visible != sub["open"]:
-                logging.debug(
-                    "subscription to %s %s",
-                    sub["rid"],
-                    "open" if sub["open"] else "closed",
-                )
-                weechat.buffer_set(buf, "hidden", "0" if sub["open"] else "1")
+            buf = self._buffers.get(sub["rid"])
+            if buf is None:
+                if not sub["open"]:
+                    return
+
+            await self._update_buffer_from_sub(sub)
         else:
             logging.warning(
                 "Unhandled stream-notify-user:\n%s",
@@ -616,7 +638,7 @@ class Server:
 
         buf = self._buffers.get(msg["rid"])
         if buf is None:
-            buf = self._handle_new_subscription(msg["rid"])
+            buf = await self._handle_new_subscription(msg["rid"])
 
         # TODO:  This is probably not the most performant thing to do, if that
         # becomes an issue this is a good place to look.  But, until then,
@@ -666,10 +688,7 @@ class Server:
 
             mentioned = [u["username"] for u in msg.get("mentions", [])]
             if mentioned:
-                highlight_on = [self._username, "all"]
-                if weechat.buffer_get_integer(buf, "hidden") == 0:
-                    highlight_on.append("here")
-
+                highlight_on = [self._username, "all", "here"]
                 if any(u in mentioned for u in highlight_on):
                     level = weechat.WEECHAT_HOTLIST_HIGHLIGHT
 
@@ -912,12 +931,11 @@ class Plugin:
         return self._loop.create_task(task)
 
     def shutdown(self):
-        self._loop.disconnect()
-
         async def go():
             await asyncio.gather(*[s.disconnect() for s in self._servers.values()])
 
-        asyncio.run(go())
+        self._loop.run_until_complete(go())
+        self._loop.disconnect()
 
     def cmd_help(self, buf, *args):
         weechat.prnt(buf, f"help: command: {args}")
@@ -949,8 +967,8 @@ class Plugin:
             weechat.prnt(buf, f"server '{args[0]}' not connected")
             return weechat.WEECHAT_RC_OK
 
-        t = self.create_task(self._servers[name].disconnect())
-        t.add_done_callback(lambda _: self._servers.pop(name))
+        self._loop.run_until_complete(self._servers[name].disconnect())
+        self._servers.pop(name)
         return weechat.WEECHAT_RC_OK_EAT
 
     def cmd_server(self, buf, *args):
@@ -1109,15 +1127,13 @@ def rc_server_run_cb(cmd, buf, args):
         return weechat.WEECHAT_RC_OK_EAT
 
 
-def rc_signal_buffer_hidden(_, signal, buf):
-    hide = signal == "buffer_hidden"
+def rc_signal_buffer_closing(_, __, buf):
     server_name = weechat.buffer_get_string(buf, "localvar_server")
     if not server_name:
         return weechat.WEECHAT_RC_ERROR
 
     server = plugin.server(server_name)
-    rid = weechat.buffer_get_string(buf, "localvar_rid")
-    plugin.create_task(server.toggle_hidden(rid, hide))
+    server.close_buffer(buf)
     return weechat.WEECHAT_RC_OK
 
 
