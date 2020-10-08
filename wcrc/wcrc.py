@@ -56,6 +56,10 @@ class WeechatLoop(asyncio.SelectorEventLoop):
         self._hook = None
 
     def tick(self):
+        if self._hook is None:
+            logging.error("tick after unhook")
+            return
+
         if self._next_hook is not None:
             weechat.unhook(self._next_hook)
             self._next_hook = None
