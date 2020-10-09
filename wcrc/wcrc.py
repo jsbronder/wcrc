@@ -443,7 +443,12 @@ class Server:
             ts = (ts + ts.astimezone().utcoffset()).timestamp()
 
             tags = init_tags[:]
-            tags.append(f"rcid_{msg['_id']}")
+            tags.extend(
+                (
+                    f"nick_{msg['u']['username']}",
+                    f"rcid_{msg['_id']}",
+                )
+            )
 
             weechat.prnt_date_tags(
                 buf,
@@ -707,7 +712,7 @@ class Server:
             weechat.prnt_date_tags(
                 buf,
                 ts,
-                f"rcid_{msg['_id']}",
+                f"rcid_{msg['_id']},nick_{msg['u']['username']}",
                 f"{msg['u']['username']}\t{msg['msg']}",
             )
 
