@@ -138,6 +138,7 @@ class Server:
         self._ws_uri = "ws%s://%s/websocket" % ("s" if ssl else "", uri)
         self._rest_uri = "http%s://%s/api/v1" % ("s" if ssl else "", uri)
 
+        self._buffer = None
         self._state = ServerState.DISCONNECTED
         self._buffers = {}
         self._buffer_hooks = collections.defaultdict(list)
@@ -245,6 +246,10 @@ class Server:
         await self._session.close()
         self._session = None
 
+        if self._buffer is not None:
+            weechat.buffer_close(self._buffer)
+            self._buffer = None
+
         self._state = ServerState.DISCONNECTED
 
     async def recv(self):
@@ -323,8 +328,16 @@ class Server:
                 ",".join((self._username, f"@{self._username}", "@all", "@here")),
             )
             weechat.buffer_set(buf, "localvar_set_server", self._name)
+            weechat.buffer_set(buf, "localvar_set_nick", self._username)
+
+            if sub["t"] == "c":
+                weechat.buffer_set(buf, "localvar_set_type", "channel")
+                weechat.buffer_set(buf, "localvar_set_channel", name)
+            else:
+                weechat.buffer_set(buf, "localvar_set_type", "private")
+
             weechat.buffer_set(buf, "localvar_set_rid", rid)
-            weechat.buffer_set(buf, "localvar_set_type", sub["t"])
+            weechat.buffer_set(buf, "localvar_set_rc_type", sub["t"])
 
             self._buffer_hooks[rid].extend(
                 [
@@ -341,7 +354,7 @@ class Server:
         return buf
 
     async def _set_room_members(self, buf, rid):
-        rtype = weechat.buffer_get_string(buf, "localvar_type")
+        rtype = weechat.buffer_get_string(buf, "localvar_rc_type")
         groups = {
             n.split("|")[1]: weechat.nicklist_search_group(buf, "", n)
             for n in self._nick_groups
@@ -386,7 +399,7 @@ class Server:
                     weechat.nicklist_add_nick(buf, nicklist, name, "", "", "", 1)
 
     async def _set_room_history(self, buf, rid, last_seen):
-        rtype = weechat.buffer_get_string(buf, "localvar_type")
+        rtype = weechat.buffer_get_string(buf, "localvar_rc_type")
 
         url = {
             "c": "channels.history",
@@ -480,6 +493,13 @@ class Server:
                 }
             )
             logging.info("REST login to %s as %s", self._name, self._username)
+
+        self._buffer = weechat.buffer_new(self._name, "rc_server_run_cb", "", "", "")
+        weechat.buffer_set(self._buffer, "localvar_set_server", self._name)
+        weechat.buffer_set(self._buffer, "localvar_set_type", "server")
+        weechat.buffer_set(self._buffer, "localvar_set_nick", self._username)
+        weechat.buffer_set(self._buffer, "short_name", self._name)
+        weechat.prnt(self._buffer, f"Logged in as {self._username}")
 
         async with self.rest_get("users.list") as resp:
             jd = await resp.json()
@@ -702,7 +722,7 @@ class Server:
                 await self.mark_read(msg["rid"])
 
             level = weechat.WEECHAT_HOTLIST_MESSAGE
-            if weechat.buffer_get_string(buf, "localvar_type") in ("p", "d"):
+            if weechat.buffer_get_string(buf, "localvar_rc_type") in ("p", "d"):
                 level = weechat.WEECHAT_HOTLIST_PRIVATE
 
             mentioned = [u["username"] for u in msg.get("mentions", [])]
@@ -1091,7 +1111,7 @@ def rc_command_query(_, buf, args):
     # we can just look there and schedule a new room to be created if
     # necessary.
     for buf in server.buffers.values():
-        rtype = weechat.buffer_get_string(buf, "localvar_type")
+        rtype = weechat.buffer_get_string(buf, "localvar_rc_type")
         if rtype != "d":
             continue
 
@@ -1217,7 +1237,7 @@ def main():
         "",
     )
     rcbuf = weechat.buffer_new(
-        "rocket_chat", "on_buf_input", "debug-buffer", "on_buf_closed", "debug-buffer"
+        "wcrc-debug", "on_buf_input", "debug-buffer", "on_buf_closed", "debug-buffer"
     )
     setup_logging(rcbuf, level=logging.DEBUG)
 
