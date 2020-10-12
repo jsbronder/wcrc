@@ -351,6 +351,8 @@ class Server:
             for ng, color in self._nick_groups.items():
                 weechat.nicklist_add_group(buf, "", ng, color, 1)
 
+            self._buffers[rid] = buf
+
         return buf
 
     async def _set_room_members(self, buf, rid):
@@ -523,7 +525,6 @@ class Server:
 
                 rid = sub["rid"]
                 buf = await self._update_buffer_from_sub(sub)
-                self._buffers[rid] = buf
 
                 await self._set_room_members(buf, rid)
                 await self._set_room_history(buf, rid, sub["ls"])
@@ -620,7 +621,6 @@ class Server:
 
             sub = jd["subscription"]
             buf = await self._update_buffer_from_sub(sub)
-            self._buffers[rid] = buf
             await self._set_room_members(buf, rid)
             logging.debug(
                 "New subscription %s",
