@@ -616,15 +616,6 @@ class Server:
             }
         )
 
-        await self.send(
-            {
-                "msg": "sub",
-                "id": "stream-notify-user-subscriptions-changed",
-                "name": "stream-notify-user",
-                "params": [f"{self._uid}/subscriptions-changed", False],
-            }
-        )
-
         while True:
             try:
                 jd = await self.recv()
@@ -656,9 +647,6 @@ class Server:
             return buf
 
     async def _process_message(self, jd):
-        if jd.get("collection") == "stream-notify-user":
-            return await self._handle_stream_notify_user(jd)
-
         if jd.get("collection") == "stream-room-messages":
             return await self._handle_stream_room_messages(jd)
 
@@ -684,24 +672,6 @@ class Server:
         logging.warning(
             "Unhandled message:\n%s", json.dumps(jd, sort_keys=True, indent=2)
         )
-
-    async def _handle_stream_notify_user(self, jd):
-        if jd["fields"]["eventName"].endswith("subscriptions-changed"):
-            action, sub = jd["fields"]["args"]
-            assert action == "updated", json.dumps(jd, sort_keys=True, indent=2)
-
-            buf = self._buffers.get(sub["rid"])
-            if buf is None:
-                if not sub["open"]:
-                    return
-
-            await self._update_buffer_from_sub(sub)
-            return True
-        else:
-            logging.warning(
-                "Unhandled stream-notify-user:\n%s",
-                json.dumps(jd, sort_keys=True, indent=2),
-            )
 
     async def _handle_stream_room_messages(self, jd):
         msg, room_meta = jd["fields"]["args"]
