@@ -352,6 +352,16 @@ class Server:
                 weechat.nicklist_add_group(buf, "", ng, color, 1)
 
             self._buffers[rid] = buf
+            await self._set_room_members(buf, rid)
+
+            ls = sub["ls"]
+            if isinstance(ls, dict):
+                ls = datetime.datetime.fromtimestamp(ls["$date"] / 1000)
+            else:
+                ls = datetime.datetime.fromisoformat(ls.rstrip("Z"))
+                ls += ls.astimezone().utcoffset()
+
+            await self._set_room_history(buf, rid, ls)
 
         return buf
 
@@ -412,7 +422,7 @@ class Server:
         init_tags = ["notify_none", "no_highlight", "logger_backlog"]
         stack = []
         params = {"roomId": rid, "unreads": "true", "count": 50}
-        params["oldest"] = last_seen
+        params["oldest"] = last_seen.isoformat()
 
         # Get chunks of messages until we've pulled the last one seen by the
         # user.  After that get one more chunk just to ensure we have the
@@ -435,6 +445,7 @@ class Server:
                 params["offset"] = len(stack)
 
         stack.reverse()
+        seen = True
         for msg in stack:
             # Value can be null
             edited = msg.get("editedAt") is not None
@@ -442,9 +453,30 @@ class Server:
             ts = datetime.datetime.fromisoformat(
                 (msg["editedAt"] if edited else msg["ts"]).rstrip("Z")
             )
-            ts = (ts + ts.astimezone().utcoffset()).timestamp()
+            ts = ts + ts.astimezone().utcoffset()
 
-            tags = init_tags[:]
+            if seen:
+                seen = ts < last_seen
+                if not seen:
+                    weechat.buffer_set(buf, "unread", "")
+
+            if seen:
+                tags = init_tags[:]
+            else:
+                tags = []
+
+                level = weechat.WEECHAT_HOTLIST_MESSAGE
+                if rtype in ("p", "d"):
+                    level = weechat.WEECHAT_HOTLIST_PRIVATE
+
+                mentioned = [u["username"] for u in msg.get("mentions", [])]
+                if mentioned:
+                    highlight_on = [self._username, "all", "here"]
+                    if any(u in mentioned for u in highlight_on):
+                        level = weechat.WEECHAT_HOTLIST_HIGHLIGHT
+
+                weechat.buffer_set(buf, "hotlist", level)
+
             tags.extend(
                 (
                     f"nick_{msg['u']['username']}",
@@ -454,7 +486,7 @@ class Server:
 
             weechat.prnt_date_tags(
                 buf,
-                int(ts),
+                int(ts.timestamp()),
                 ",".join(tags),
                 f"{msg['u']['username']}\t{msg['msg']}",
             )
@@ -463,7 +495,7 @@ class Server:
             tags.append("rc_statusline")
             if edited:
                 msgs.append("[edited]")
-                tags.append(f"rcedit_{int(ts * 1000)}")
+                tags.append(f"rcedit_{int(ts.timestamp() * 1000)}")
 
             # Value can be null
             if msg.get("reactions") is not None:
@@ -473,7 +505,7 @@ class Server:
 
             weechat.prnt_date_tags(
                 buf,
-                int(ts),
+                int(ts.timestamp()),
                 ",".join(tags),
                 f"\t\t{weechat.prefix('network')}{' '.join(msgs)}" if msgs else "",
             )
@@ -523,11 +555,7 @@ class Server:
                 if not sub["open"]:
                     continue
 
-                rid = sub["rid"]
-                buf = await self._update_buffer_from_sub(sub)
-
-                await self._set_room_members(buf, rid)
-                await self._set_room_history(buf, rid, sub["ls"])
+                await self._update_buffer_from_sub(sub)
 
         self._ws = await self._session.ws_connect(f"{self._ws_uri}")
 
@@ -621,7 +649,6 @@ class Server:
 
             sub = jd["subscription"]
             buf = await self._update_buffer_from_sub(sub)
-            await self._set_room_members(buf, rid)
             logging.debug(
                 "New subscription %s",
                 weechat.buffer_get_string(buf, "name"),
@@ -669,6 +696,7 @@ class Server:
                     return
 
             await self._update_buffer_from_sub(sub)
+            return True
         else:
             logging.warning(
                 "Unhandled stream-notify-user:\n%s",
@@ -681,8 +709,8 @@ class Server:
         buf = self._buffers.get(msg["rid"])
         if buf is None:
             buf = await self._handle_new_subscription(msg["rid"])
-            if buf is None:
-                return
+            # History was loaded which includes the lastest message
+            return
 
         # TODO:  This is probably not the most performant thing to do, if that
         # becomes an issue this is a good place to look.  But, until then,
