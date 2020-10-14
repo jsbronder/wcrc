@@ -172,7 +172,8 @@ class Server:
         async with self.rest_post("im.create", json={"username": nick}) as resp:
             jd = await resp.json()
             assert jd["success"], json.dumps(jd, sort_keys=True, indent=2)
-            await self._handle_new_subscription(jd["room"]["rid"])
+            buf = await self._handle_new_subscription(jd["room"]["rid"])
+            weechat.buffer_set(buf, "display", "auto")
 
     def close_buffer(self, buf):
         if self._state == ServerState.DISCONNECTING:
