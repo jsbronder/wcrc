@@ -342,9 +342,11 @@ class Server:
             self._buffer_hooks[rid].extend(
                 [
                     weechat.hook_signal(
-                        "buffer_closing", "rc_signal_buffer_closing", ""
+                        "buffer_closing", "rc_signal_buffer_closing", "wcrc"
                     ),
-                    weechat.hook_signal("buffer_switch", "rc_signal_buffer_switch", ""),
+                    weechat.hook_signal(
+                        "buffer_switch", "rc_signal_buffer_switch", "wcrc"
+                    ),
                 ]
             )
 
@@ -1178,22 +1180,37 @@ def rc_server_run_cb(cmd, buf, args):
         return weechat.WEECHAT_RC_OK_EAT
 
 
-def rc_signal_buffer_closing(_, __, buf):
+def rc_signal_buffer_closing(cb_data, _, buf):
+    if cb_data != "wcrc":
+        return weechat.WEECHAT_RC_OK
+
     server_name = weechat.buffer_get_string(buf, "localvar_server")
     if not server_name:
-        return weechat.WEECHAT_RC_ERROR
+        return weechat.WEECHAT_RC_OK
+
+    try:
+        server = plugin.server(server_name)
+    except KeyError:
+        return weechat.WEECHAT_RC_OK
 
     server = plugin.server(server_name)
     server.close_buffer(buf)
     return weechat.WEECHAT_RC_OK
 
 
-def rc_signal_buffer_switch(_, __, buf):
+def rc_signal_buffer_switch(cb_data, _, buf):
+    if cb_data != "wcrc":
+        return weechat.WEECHAT_RC_OK
+
     server_name = weechat.buffer_get_string(buf, "localvar_server")
     if not server_name:
-        return weechat.WEECHAT_RC_ERROR
+        return weechat.WEECHAT_RC_OK
 
-    server = plugin.server(server_name)
+    try:
+        server = plugin.server(server_name)
+    except KeyError:
+        return weechat.WEECHAT_RC_OK
+
     rid = weechat.buffer_get_string(buf, "localvar_rid")
     plugin.create_task(server.mark_read(rid))
     return weechat.WEECHAT_RC_OK
