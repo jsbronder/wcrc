@@ -83,8 +83,14 @@ class WeechatLoop(asyncio.SelectorEventLoop):
     def create_task(self, *args):
         r = super().create_task(*args)
         if not self.is_running():
-            tick()
+            self.tick()
         return r
+
+    def run_until_complete(self, *args):
+        if self.is_running():
+            self.stop()
+
+        return super().run_until_complete(*args)
 
 
 def setup_logging(wbuf, level=logging.WARNING):
@@ -193,7 +199,7 @@ class Server:
         del self._buffer_hooks[rid]
 
         self._method_ids.add(method_id)
-        self._plugin.create_task(
+        self._loop.run_until_complete(
             self.send(
                 {
                     "msg": "method",
@@ -290,7 +296,7 @@ class Server:
         method_id = f"{rid}.{msg_id}"
         self._method_ids.add(method_id)
 
-        self._plugin.create_task(
+        self._loop.run_until_complete(
             self.send(
                 {
                     "msg": "method",
@@ -999,9 +1005,6 @@ class Plugin:
     def server(self, name):
         return self._servers[name]
 
-    def create_task(self, task):
-        return self._loop.create_task(task)
-
     def shutdown(self):
         async def go():
             await asyncio.gather(*[s.disconnect() for s in self._servers.values()])
@@ -1172,7 +1175,8 @@ def rc_command_query(_, buf, args):
         weechat.command("", f"/buffer {name}")
         break
     else:
-        plugin.create_task(server.create_im(target))
+        global loop
+        loop.run_until_complete(server.create_im(target))
 
     return weechat.WEECHAT_RC_OK_EAT
 
@@ -1244,7 +1248,8 @@ def rc_signal_buffer_switch(cb_data, _, buf):
         return weechat.WEECHAT_RC_OK
 
     rid = weechat.buffer_get_string(buf, "localvar_rid")
-    plugin.create_task(server.mark_read(rid))
+    global loop
+    loop.run_until_complete(server.mark_read(rid))
     return weechat.WEECHAT_RC_OK
 
 
