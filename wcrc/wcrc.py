@@ -452,6 +452,24 @@ class Server:
 
                 params["offset"] = len(stack)
 
+        def handle_room_status_change(ts, msg, tags):
+            line = None
+            if msg.get("t") == "room_changed_topic":
+                line = f"{msg['u']['username']} changed the topic to {msg['msg']}"
+            elif msg.get("t") == "au":
+                line = f"{msg['u']['username']} added {msg['msg']} to the channel"
+            elif msg.get("t") == "ul":
+                line = f"{msg['u']['username']} left the channel"
+
+            if line is not None:
+                prefix = weechat.prefix("network")
+                weechat.prnt_date_tags(
+                    buf, int(ts.timestamp()), ",".join(tags), f"{prefix}{line}"
+                )
+                return True
+
+            return False
+
         stack.reverse()
         seen = True
         for msg in stack:
@@ -491,6 +509,9 @@ class Server:
                     f"rcid_{msg['_id']}",
                 )
             )
+
+            if handle_room_status_change(ts, msg, tags):
+                continue
 
             weechat.prnt_date_tags(
                 buf,
