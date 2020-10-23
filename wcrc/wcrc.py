@@ -513,12 +513,13 @@ class Server:
             if handle_room_status_change(ts, msg, tags):
                 continue
 
-            weechat.prnt_date_tags(
-                buf,
-                int(ts.timestamp()),
-                ",".join(tags),
-                f"{msg['u']['username']}\t{msg['msg']}",
-            )
+            if msg["msg"]:
+                weechat.prnt_date_tags(
+                    buf,
+                    int(ts.timestamp()),
+                    ",".join(tags),
+                    f"{msg['u']['username']}\t{msg['msg']}",
+                )
 
             msgs = []
             tags.append("rc_statusline")
