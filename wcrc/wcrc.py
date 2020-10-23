@@ -357,8 +357,10 @@ class Server:
             self._buffers[rid] = buf
             await self._set_room_members(buf, rid)
 
-            ls = sub["ls"]
-            if isinstance(ls, dict):
+            ls = sub.get("ls")
+            if ls is None:
+                ls = datetime.datetime.fromtimestamp(0)
+            elif isinstance(ls, dict):
                 ls = datetime.datetime.fromtimestamp(ls["$date"] / 1000)
             else:
                 ls = datetime.datetime.fromisoformat(ls.rstrip("Z"))
