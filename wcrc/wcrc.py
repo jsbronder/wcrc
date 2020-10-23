@@ -430,7 +430,10 @@ class Server:
         # Get chunks of messages until we've pulled the last one seen by the
         # user.  After that get one more chunk just to ensure we have the
         # backlog reasonably filled.
-        while True:
+        n_lines = weechat.config_integer(
+            weechat.config_get("weechat.history.max_buffer_lines_number")
+        )
+        while len(stack) < n_lines:
             async with self.rest_get(url, params=params) as resp:
                 jd = await resp.json()
 
