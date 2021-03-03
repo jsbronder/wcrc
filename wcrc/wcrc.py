@@ -1031,8 +1031,13 @@ class Plugin:
             )
             return weechat.WEECHAT_RC_OK_EAT
 
-        self._connect(args[0])
-        return weechat.WEECHAT_RC_OK_EAT
+        try:
+            self._connect(args[0])
+        except Exception as e:
+            weechat.prnt("", f"Failed to connect to {args[0]}: {e}")
+            logging.exception(f"Failed to connect to {args[0]}")
+        finally:
+            return weechat.WEECHAT_RC_OK_EAT
 
     def disconnect(self, buf, *args):
         if not args:
@@ -1123,7 +1128,6 @@ class Plugin:
             name=server, uri=f"{host}:{port}", ssl=ssl, loop=self._loop, plugin=self
         )
         self._loop.run_until_complete(self._servers[server].connect(token))
-        return weechat.WEECHAT_RC_OK
 
 
 def rc_command_query(_, buf, args):
