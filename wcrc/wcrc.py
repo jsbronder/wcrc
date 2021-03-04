@@ -711,6 +711,15 @@ class Server:
 
     async def _handle_stream_room_messages(self, jd):
         msg, room_meta = jd["fields"]["args"]
+        if isinstance(msg, list):
+            # Workaround https://github.com/RocketChat/Rocket.Chat/pull/20801
+            # Which is to say, upstream made this a list by mistake in 3.8.0,
+            # still hasn't fixed it after 8 point releases and no one can
+            # actually determine if its a bug or not because there's no
+            # documentation telling you what to expect from this stream.  But
+            # in 3.12.0, it's reverted, so we need to handle both.
+            assert len(msg) == 1, json.dumps(msg, sort_keys=True, indent=2)
+            msg = msg[0]
 
         buf = self._buffers.get(msg["rid"])
         if buf is None:
