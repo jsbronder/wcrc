@@ -261,7 +261,13 @@ class Server:
 
     async def recv(self):
         while True:
-            jd = await self._ws.receive_json()
+            ws_msg = await self._ws.receive()
+            if ws_msg.type == aiohttp.WSMsgType.TEXT:
+                jd = ws_msg.json()
+            else:
+                if ws_msg.type == aiohttp.WSMsgType.CLOSED:
+                    raise ConnectionResetError("server closed websocket")
+                raise ConnectionError(f"Unexpected websocket message {ws_msg.type!r}")
 
             if jd.get("msg") == "ping":
                 await self._ws.send_json({"msg": "pong"})
@@ -652,12 +658,20 @@ class Server:
             }
         )
 
-        while True:
+        while self._state == ServerState.CONNECTED:
             try:
                 jd = await self.recv()
                 await self._process_message(jd)
             except asyncio.CancelledError:
                 break
+            except ConnectionError:
+                weechat.prnt(
+                    "",
+                    "%Lost connection to rocket.chat server %s"
+                    % (weechat.prefix("error"), self._name),
+                )
+                logging.exception(f"Disconnected from {self._name}")
+                await self.disconnect()
             except Exception:
                 logging.exception("Exception in main loop - restarting")
 
