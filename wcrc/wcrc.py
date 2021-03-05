@@ -2,6 +2,7 @@ import asyncio
 import collections
 import concurrent
 import contextlib
+import dataclasses
 import datetime
 import enum
 import json
@@ -16,6 +17,15 @@ import weechat
 loop = None
 plugin = None
 hdata = None
+
+
+@dataclasses.dataclass(init=False, repr=False, eq=False, frozen=True)
+class prefix:
+    error = weechat.prefix("error")
+    network = weechat.prefix("network")
+    action = weechat.prefix("action")
+    join = weechat.prefix("join")
+    quit = weechat.prefix("quit")
 
 
 def tick(*args):
@@ -474,9 +484,8 @@ class Server:
                 line = f"{msg['u']['username']} left the channel"
 
             if line is not None:
-                prefix = weechat.prefix("network")
                 weechat.prnt_date_tags(
-                    buf, int(ts.timestamp()), ",".join(tags), f"{prefix}{line}"
+                    buf, int(ts.timestamp()), ",".join(tags), f"{prefix.network}{line}"
                 )
                 return True
 
@@ -549,7 +558,7 @@ class Server:
                 buf,
                 int(ts.timestamp()),
                 ",".join(tags),
-                f"\t\t{weechat.prefix('network')}{' '.join(msgs)}" if msgs else "",
+                f"\t\t{prefix.network}{' '.join(msgs)}" if msgs else "",
             )
 
         logging.debug(
@@ -668,7 +677,7 @@ class Server:
                 weechat.prnt(
                     "",
                     "%Lost connection to rocket.chat server %s"
-                    % (weechat.prefix("error"), self._name),
+                    % (prefix.error, self._name),
                 )
                 logging.exception(f"Disconnected from {self._name}")
                 await self.disconnect()
@@ -800,39 +809,38 @@ class Server:
 
         # Topic change
         if msg.get("t") == "room_changed_topic":
-            prefix = weechat.prefix("network")
             weechat.prnt(
                 buf,
-                f"{prefix}{msg['u']['username']} changed the topic to {msg['msg']}",
+                f"{prefix.network}{msg['u']['username']} changed the topic to {msg['msg']}",
             )
             action_taken = True
 
         if msg.get("t") == "au":
-            prefix = weechat.prefix("network")
             weechat.prnt(
                 buf,
-                f"{prefix}{msg['u']['username']} added {msg['msg']} to the channel",
+                f"{prefix.network}{msg['u']['username']} added {msg['msg']} to the channel",
             )
             action_taken = True
 
         if msg.get("t") == "ul":
-            prefix = weechat.prefix("network")
-            weechat.prnt(buf, f"{prefix}{msg['u']['username']} left the channel")
+            weechat.prnt(
+                buf, f"{prefix.network}{msg['u']['username']} left the channel"
+            )
             action_taken = True
 
         # Summarize urls
         if msg.get("urls", []) and msg["urls"][0].get("meta") is not None:
-            prefix = weechat.prefix("network")
             for url, meta in ((url["url"], url["meta"]) for url in msg["urls"]):
-                weechat.prnt(buf, f"{prefix}Link: {meta['pageTitle']}")
+                weechat.prnt(buf, f"{prefix.network}Link: {meta['pageTitle']}")
             action_taken = True
 
         if "editedAt" in msg:
             action_taken |= self._update_msg_text(buf, msg)
 
         if not action_taken:
-            prefix = weechat.prefix("network")
-            weechat.prnt(buf, f"{prefix}unperfectly handled message in debug buffer")
+            weechat.prnt(
+                buf, f"{prefix.network}unperfectly handled message in debug buffer"
+            )
             logging.debug("%s\n", json.dumps(jd, sort_keys=True, indent=2))
 
     async def _handle_stream_notify_logged(self, jd):
@@ -908,7 +916,7 @@ class Server:
         new_message = ""
         if reactions:
             new_message = "%s%s%s" % (
-                weechat.prefix("network"),
+                prefix.network,
                 "[edited] " if any(t.startswith("rcedit_") for t in tags) else "",
                 " ".join(f"{k}{v}" for k, v in reactions.items()),
             )
@@ -942,10 +950,9 @@ class Server:
             (t.split("_")[1] for t in tags if t.startswith("rcedit_")), None
         )
         if last_edit is None:
-            prefix = weechat.prefix("network")
             current = weechat.hdata_string(hdata.line_data, ld, "message")
-            index = current.find(prefix) + len(prefix)
-            new_msg = f"{prefix}[edited] {current[index:]}"
+            index = current.find(prefix.network) + len(prefix.network)
+            new_msg = f"{prefix.network}[edited] {current[index:]}"
             weechat.hdata_update(hdata.line_data, ld, {"message": new_msg})
         elif int(last_edit) == edited_ts:
             return False
@@ -1163,10 +1170,7 @@ def rc_command_query(_, buf, args):
     target = args.split()[1]
     nicks = [user._username for user in server.users.values()]
     if target not in nicks:
-        weechat.prnt(
-            buf,
-            f"%sNo known user {target} on {server_name}" % (weechat.prefix("error")),
-        )
+        weechat.prnt(buf, f"{prefix.network}No known user {target} on {server_name}")
         return weechat.WEECHAT_RC_ERROR
 
     # If we fetch all subscriptions on connect and then keep up with the
@@ -1227,9 +1231,8 @@ def rc_server_run_cb(cmd, buf, args):
             "away": weechat.color("nicklist_away"),
             "offline": weechat.color("chat_nick_offline"),
         }
-        prefix = weechat.prefix("network")
 
-        weechat.prnt(buf, f"{prefix}Users on {server.name}:")
+        weechat.prnt(buf, f"{prefix.network}Users on {server.name}:")
         for uid, user in server.users.items():
             weechat.prnt(
                 buf,
