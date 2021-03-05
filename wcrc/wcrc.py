@@ -8,6 +8,7 @@ import enum
 import json
 import logging
 import math
+import re
 import uuid
 
 import aiohttp
@@ -146,6 +147,8 @@ class Server:
         "2|away": weechat.color("nicklist_away"),
         "3|offline": weechat.color("chat_nick_offline"),
     }
+
+    _quote_re = re.compile(r"\[ ]\([^)]*\?msg=\w+\) ")
 
     def __init__(self, name, uri, ssl, loop, plugin):
         self._name = name
@@ -328,6 +331,17 @@ class Server:
                 }
             )
         )
+
+    def _quoted_message(self, quoter, quoted, quote):
+        # For now, we're not going to support multiple levels of
+        # quotes.  I don't even know how to make that look reasonable
+        # without some way to indent each level, or prefix each line
+        # with some marker.  Perhaps colors, but that's polishing work
+        # best done once all messages types are actually handled.
+        italic = weechat.color("italic")
+        quote = self._quote_re.sub("", quote)
+        quote = "\n".join(f"    {italic}{l}" for l in quote.split("\n"))
+        return f"{italic}{quoter}\t{italic}{quoted} said:\n\t{quote}"
 
     async def _update_buffer_from_sub(self, sub):
         rid = sub["rid"]
@@ -535,6 +549,20 @@ class Server:
                 continue
 
             if msg["msg"]:
+                msg["msg"] = self._quote_re.sub("", msg["msg"])
+
+                if msg.get("attachments", [{}])[0].get("message_link", ""):
+                    weechat.prnt_date_tags(
+                        buf,
+                        int(ts.timestamp()),
+                        ",".join(tags),
+                        self._quoted_message(
+                            quoter=msg["u"]["username"],
+                            quoted=msg["attachments"][0]["author_name"],
+                            quote=msg["attachments"][0].get("text", ""),
+                        ),
+                    )
+
                 weechat.prnt_date_tags(
                     buf,
                     int(ts.timestamp()),
@@ -774,6 +802,19 @@ class Server:
 
         if not is_msg_update():
             ts = msg["ts"]["$date"] // 1000
+            msg["msg"] = self._quote_re.sub("", msg["msg"])
+
+            if msg.get("attachments", [{}])[0].get("message_link", ""):
+                weechat.prnt_date_tags(
+                    buf,
+                    ts,
+                    f"rcid_{msg['_id']},nick_{msg['u']['username']}",
+                    self._quoted_message(
+                        quoter=msg["u"]["username"],
+                        quoted=msg["attachments"][0]["author_name"],
+                        quote=msg["attachments"][0].get("text", ""),
+                    ),
+                )
 
             weechat.prnt_date_tags(
                 buf,
