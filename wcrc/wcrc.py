@@ -558,7 +558,7 @@ class Server:
                 buf,
                 int(ts.timestamp()),
                 ",".join(tags),
-                f"\t\t{prefix.network}{' '.join(msgs)}" if msgs else "",
+                f"\t\t{prefix.network}{' '.join(msgs)}" if msgs else "\t\t",
             )
 
         logging.debug(
