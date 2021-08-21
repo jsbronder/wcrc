@@ -359,6 +359,7 @@ class Server:
             weechat.buffer_set(buf, "notify", "2")
             weechat.buffer_set(buf, "short_name", name)
             weechat.buffer_set(buf, "nicklist", "1")
+            weechat.buffer_set(buf, "input_multiline", "1")
             weechat.buffer_set(
                 buf,
                 "highlight_words_add",
