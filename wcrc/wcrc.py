@@ -705,7 +705,7 @@ class Server:
             except ConnectionError:
                 weechat.prnt(
                     "",
-                    "%Lost connection to rocket.chat server %s"
+                    "%sLost connection to rocket.chat server %s"
                     % (prefix.error, self._name),
                 )
                 logging.exception(f"Disconnected from {self._name}")
